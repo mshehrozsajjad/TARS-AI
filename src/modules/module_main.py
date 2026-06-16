@@ -96,6 +96,13 @@ def wake_word_callback(wake_response):
         character_name = CONFIG['CHAR']['character_name']
         ui_manager.update_data(character_name, wake_response, character_name)
 
+    # In Gemini Live mode, skip the TTS wake response — Gemini handles all audio.
+    # Just beep (via indicators) and go straight to listening.
+    conversation_mode = CONFIG.get("GEMINI_LIVE", {}).get("conversation_mode", "standard")
+    if conversation_mode == "gemini_live":
+        set_tars_state(TarsState.LISTENING)
+        return
+
     set_tars_state(TarsState.TALKING)
 
     # Don't run barge-in on wake responses — they're too short and the mic
@@ -578,7 +585,7 @@ def gemini_live_callback():
                 _has_started_talking[0] = True
                 set_tars_state(TarsState.TALKING)
                 speed.mark_first_token()
-            if ui_manager:
+            if ui_manager and hasattr(ui_manager, 'update_streaming_data'):
                 ui_manager.update_streaming_data(text)
             if _is_webui:
                 try:
@@ -602,7 +609,7 @@ def gemini_live_callback():
         output_text = result.get('output_transcript', '')
 
         # Finalize UI
-        if ui_manager and output_text:
+        if ui_manager and output_text and hasattr(ui_manager, 'update_streaming_data'):
             ui_manager.update_streaming_data(output_text)
 
         set_tars_state(TarsState.LISTENING)
