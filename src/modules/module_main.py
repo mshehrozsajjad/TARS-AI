@@ -207,8 +207,9 @@ def utterance_callback(message):
         )
 
         # Add placeholder message to OpenGL UI for streaming updates
+        # Only for full UI which overwrites it via update_streaming_data
         character_name = CONFIG['CHAR']['character_name']
-        if ui_manager:
+        if ui_manager and hasattr(ui_manager, 'update_streaming_data'):
             ui_manager.update_data(character_name, "", character_name)
 
         def on_reply_chunk(chunk, is_first):
