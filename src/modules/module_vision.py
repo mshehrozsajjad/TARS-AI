@@ -46,7 +46,48 @@ try:
     from UI.module_ui_camera import CameraModule as _CameraModule
     CameraModule = _CameraModule
 except ImportError:
-    pass
+    # Fallback: try picamera2 directly (works without cv2/pygame on low-RAM devices)
+    try:
+        from picamera2 import Picamera2 as _Picamera2
+
+        class _LiteCameraModule:
+            """Lightweight camera capture using picamera2 only (no cv2/pygame)."""
+            _instance = None
+
+            def __new__(cls, width=1920, height=1080, **kwargs):
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+                return cls._instance
+
+            def __init__(self, width=1920, height=1080, **kwargs):
+                if self._initialized:
+                    return
+                self._initialized = True
+                self._picam = _Picamera2()
+                config = self._picam.create_still_configuration(
+                    main={"size": (width, height), "format": "RGB888"}
+                )
+                self._picam.configure(config)
+                self._picam.start()
+
+            def capture_bytes(self):
+                """Capture a JPEG image and return bytes."""
+                import io
+                arr = self._picam.capture_array()
+                if Image is not None:
+                    img = Image.fromarray(arr)
+                    buf = io.BytesIO()
+                    img.save(buf, format="JPEG", quality=85)
+                    return buf.getvalue()
+                # Fallback: use simplejpeg if PIL not available
+                import simplejpeg
+                return simplejpeg.encode_jpeg(arr, quality=85)
+
+        CameraModule = _LiteCameraModule
+        queue_message("LOAD: Using lightweight camera (picamera2, no cv2)")
+    except ImportError:
+        pass
 
 # BLIP model state — guarded by _blip_lock
 from pathlib import Path
