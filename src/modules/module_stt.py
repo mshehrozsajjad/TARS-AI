@@ -736,15 +736,17 @@ class STTManager:
                 time.sleep(0.1)
                 continue
             if self._detect_wake_word():
-                if self.DEBUG:
-                    queue_message("DEBUG: Wake word detected, starting transcription")
+                print("[DEBUG] Wake word returned True", flush=True)
                 STTManager._last_status_was_sleeping = False
-                # Reset sherpa VAD state to prevent heap corruption from stale native buffers
+                # Reset sherpa VAD state
                 if self.sherpa_vad is not None:
-                    self.sherpa_vad.reset()
+                    try:
+                        self.sherpa_vad.reset()
+                    except Exception as e:
+                        print(f"[DEBUG] sherpa_vad.reset() failed: {e}", flush=True)
                 # Check again if paused before transcribing
                 _paused = self.is_paused()
-                queue_message(f"DEBUG LOOP: Wake word handled, paused={_paused}, gemini_cb={'set' if self.gemini_live_callback else 'none'}")
+                print(f"[DEBUG] paused={_paused}, gemini_cb={'set' if self.gemini_live_callback else 'none'}", flush=True)
                 if not _paused:
                     # In Gemini Live mode, skip local STT and route to Gemini callback
                     if self.gemini_live_callback is not None:
