@@ -230,12 +230,10 @@ def utterance_callback(message):
                 return
 
             # Stream to OpenGL UI (update last message in-place)
-            if ui_manager:
-                if hasattr(ui_manager, 'update_streaming_data'):
-                    ui_manager.update_streaming_data(clean_total)
-                else:
-                    character_name = CONFIG['CHAR']['character_name']
-                    ui_manager.update_data(character_name, clean_total, character_name)
+            # UIManagerLite only has update_data which adds new messages,
+            # so skip streaming updates for it — final reply is shown once below.
+            if ui_manager and hasattr(ui_manager, 'update_streaming_data'):
+                ui_manager.update_streaming_data(clean_total)
 
             # Stream new text to web UI (only if user is on webui)
             if _is_webui:

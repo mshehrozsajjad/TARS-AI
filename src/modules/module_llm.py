@@ -770,6 +770,7 @@ def execute_function_call(func_call, bot_response, user_input, source="voice", h
                 "config": CONFIG,
             }
             result = skills.execute(function_name, parameters, context)
+            queue_message(f"TOOL RESULT: {function_name} -> {str(result)[:200] if result else 'None'}")
             # If skill returns a string, update the reply
             if result is not None:
                 if bot_response.get("_skill_replied"):
