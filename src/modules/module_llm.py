@@ -691,11 +691,14 @@ def llm_execute_side_effects(parsed, user_input, source="voice", has_image=False
 
 
 def llm_process(user_input, bot_response, source="voice", has_image=False):
-    """Parse LLM response and execute side effects (legacy wrapper)."""
+    """Parse LLM response and extract reply (legacy wrapper used by vision skill).
+
+    Skips side effects (function_calls, memories) to avoid recursive tool execution
+    when the vision skill calls get_completion with a captured image.
+    """
     parsed = llm_parse_response(bot_response)
     if parsed is None:
         return "[Error: Invalid JSON from LLM. Check logs for details.]"
-    llm_execute_side_effects(parsed, user_input, source=source, has_image=has_image)
     return _sanitize_for_tts(parsed["reply"])
 
 

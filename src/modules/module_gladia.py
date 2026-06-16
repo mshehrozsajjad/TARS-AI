@@ -48,7 +48,7 @@ _cached_ws_url = None
 _cached_session_id = None
 _cache_time = 0
 _cache_lock = threading.Lock()
-_SESSION_TTL = 30  # seconds before cached session expires
+_SESSION_TTL = 60  # seconds before cached session expires
 
 
 def prewarm_session():
@@ -206,7 +206,13 @@ async def _stream_and_transcribe(api_key, mic_reader, max_duration):
     final_transcript = None
     transcript_event = asyncio.Event()
 
-    async with _websockets.connect(ws_url) as ws:
+    try:
+        ws = await _websockets.connect(ws_url)
+    except Exception as e:
+        queue_message(f"GLADIA: WebSocket connect failed (session may have expired): {e}")
+        return None
+
+    try:
         async def _receive():
             nonlocal final_transcript
             try:
@@ -285,6 +291,12 @@ async def _stream_and_transcribe(api_key, mic_reader, max_duration):
         try:
             await recv_task
         except asyncio.CancelledError:
+            pass
+
+    finally:
+        try:
+            await ws.close()
+        except Exception:
             pass
 
     queue_message(f"GLADIA: Sent {chunks_sent} audio chunks")
