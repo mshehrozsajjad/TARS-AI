@@ -27,7 +27,7 @@ enable_thinking_responses = false
 thinking_responses = ["Let me think...","soooo.....","soo....","Let's seeee...","Let me seeee...","Let's see.....","One Moment...","One Moment","hum","humm","Analyzing...","Processing...","Calculating...","Computing...","Running the numbers...","Checking...","One moment...","Scanning data...","Assessing...","Evaluating...","Let me calculate...","Working on it...","Just a moment...","Reviewing...","Compiling...","Cross-referencing...","Thinking it through...","Give me a second...","Hold on..."]
 
 [LLM]
-# AI backend: openai | grok | deepinfra | other
+# AI backend: openai | grok | deepinfra | gemini | other
 llm_backend = other
 # API endpoint URL (used when llm_backend = other)
 base_url = https://api.featherless.ai
@@ -35,6 +35,8 @@ base_url = https://api.featherless.ai
 openai_model = gpt-4o-mini
 # Model name for grok backend
 grok_model = grok-4-1-fast-non-reasoning
+# Model name for gemini backend (e.g., gemini-2.5-flash, gemini-2.5-pro)
+gemini_model = gemini-2.5-flash
 # Model name for other (custom) backend
 other_model = meta-llama/Meta-Llama-3.1-8B-Instruct
 # System instructions prepended to every conversation (keep general; personality goes in character card)

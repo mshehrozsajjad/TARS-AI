@@ -444,6 +444,7 @@ def load_config():
             "base_url": config['LLM']['base_url'],
             "openai_model": config['LLM']['openai_model'],
             "other_model": config.get('LLM', 'other_model', fallback=''),
+            "gemini_model": config.get('LLM', 'gemini_model', fallback='gemini-2.5-flash'),
             "grok_model": config['LLM']['grok_model'],
             "systemprompt": config['LLM']['systemprompt'],
             "contextsize": int(config['LLM']['contextsize']),
@@ -588,6 +589,7 @@ def get_api_key(llm_backend: str) -> str:
         "openai": "OPENAI_API_KEY",
         "grok": "GROK_API_KEY",
         "deepinfra": "DEEPINFRA_API_KEY",
+        "gemini": "GEMINI_API_KEY",
         "other": "OTHER_API_KEY"
     }
     if llm_backend not in backend_to_env_var:

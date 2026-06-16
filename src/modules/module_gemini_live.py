@@ -2,25 +2,22 @@
 Module: Gemini Live
 Manages a Gemini Live API session for real-time audio conversation.
 
-Replaces the STT → LLM pipeline with direct audio streaming to Google's
-Gemini Live API.  Audio is captured from the shared mic hub, streamed
-over a persistent WebSocket to Gemini, and text responses are returned
-for TTS synthesis.
+Replaces the entire STT → LLM → TTS pipeline with direct audio-in,
+audio-out streaming via Google's Gemini Live API.
 
-The module exposes a single entry point — run_gemini_live_session() —
-called from module_main.py after wake word detection.  It streams mic
-audio until Gemini signals a turn is complete, collects the text reply,
-and returns it for the caller to feed to TTS.
+Audio is captured from the shared mic hub, streamed over a persistent
+WebSocket to Gemini, and audio responses are played directly through
+the speaker — Gemini handles STT, LLM, and TTS in one round trip.
 
-Gemini's built-in VAD handles silence/end-of-turn detection, so no
-local Silero/RMS VAD is needed in this mode.
+The module exposes a single entry point — run_gemini_live_turn() —
+called from module_main.py after wake word detection.
 """
 
 import os
 import asyncio
 import threading
-import time
 import numpy as np
+import sounddevice as sd
 
 from modules.module_config import load_config, get_capabilities
 from modules.module_messageQue import queue_message
@@ -28,7 +25,6 @@ from modules.module_messageQue import queue_message
 CONFIG = load_config()
 
 # ── Lazy SDK import ──────────────────────────────────────────────────
-# google-genai is optional; only imported when gemini_live mode is active.
 _genai = None
 _types = None
 
@@ -50,21 +46,29 @@ def _ensure_sdk():
         )
 
 
+# ── Audio output helpers ─────────────────────────────────────────────
+
+def _get_output_device():
+    """Reuse the TTS module's resolved output device."""
+    try:
+        from modules.module_tts import _resolve_output_device, _output_device
+        _resolve_output_device()
+        return _output_device
+    except Exception:
+        return None
+
+
 # ── Gemini Live Session Manager ──────────────────────────────────────
 
 class GeminiLiveSession:
     """Manages a single Gemini Live API conversation session.
 
-    Lifecycle:
-        1. connect()          — open persistent WebSocket to Gemini
-        2. run_turn()         — stream mic audio, receive text reply
-        3. close()            — tear down the session
-        4. (repeat 2 for multi-turn within same session)
-
-    The session stays alive between turns so Gemini retains conversation
-    context.  It is closed after a configurable inactivity timeout or
-    on explicit request.
+    Uses AUDIO response modality — Gemini returns raw PCM audio that
+    is played directly through the speaker.  No separate TTS needed.
     """
+
+    # Gemini outputs 24kHz PCM audio
+    OUTPUT_SAMPLE_RATE = 24000
 
     def __init__(self):
         _ensure_sdk()
@@ -90,25 +94,24 @@ class GeminiLiveSession:
         self._context_trigger_tokens = int(gemini_cfg.get("context_trigger_tokens", 32000))
 
     async def connect(self, system_prompt=None):
-        """Open a persistent Gemini Live session."""
+        """Open a persistent Gemini Live session with AUDIO output."""
         if self._connected:
             return
 
-        # Build system instruction from character config if not provided
         if system_prompt is None:
             system_prompt = self._build_system_prompt()
 
-        # Build tool declarations from TARS skills
         tools_config = self._build_tools()
 
         config = _types.LiveConnectConfig(
-            response_modalities=[_types.Modality.TEXT],
+            response_modalities=[_types.Modality.AUDIO],
             system_instruction=system_prompt,
             context_window_compression=_types.ContextWindowCompressionConfig(
                 sliding_window=_types.SlidingWindow(),
                 trigger_tokens=self._context_trigger_tokens,
             ),
             input_audio_transcription=_types.AudioTranscriptionConfig(),
+            output_audio_transcription=_types.AudioTranscriptionConfig(),
             realtime_input_config=_types.RealtimeInputConfig(
                 activity_handling=_types.ActivityHandling.NO_INTERRUPTION,
                 automatic_activity_detection=_types.AutomaticActivityDetection(
@@ -132,7 +135,7 @@ class GeminiLiveSession:
         )
         self._session = await self._connection_manager.__aenter__()
         self._connected = True
-        queue_message(f"GEMINI_LIVE: Connected to {self._model}")
+        queue_message(f"GEMINI_LIVE: Connected to {self._model} (AUDIO mode)")
 
     async def close(self):
         """Close the Gemini Live session."""
@@ -149,68 +152,98 @@ class GeminiLiveSession:
             self._connected = False
             queue_message("GEMINI_LIVE: Session closed")
 
-    async def run_turn(self, on_text_chunk=None, on_transcript=None, stop_event=None):
-        """Stream mic audio to Gemini and return the full text reply.
+    async def run_turn(self, on_audio_chunk=None, on_input_transcript=None,
+                       on_output_transcript=None, stop_event=None):
+        """Stream mic audio to Gemini and play audio response directly.
 
         Args:
-            on_text_chunk: Optional callback(text, is_first) called as response
-                           text streams in — for feeding to the TTS pipeline.
-            on_transcript: Optional callback(text) called when Gemini transcribes
-                           user speech (for logging/display).
-            stop_event:    Optional threading.Event — if set, abort the turn.
+            on_audio_chunk:       Optional callback(pcm_bytes) for each audio chunk.
+            on_input_transcript:  Optional callback(text) when Gemini transcribes
+                                  user speech.
+            on_output_transcript: Optional callback(text) when Gemini transcribes
+                                  its own audio response.
+            stop_event:           Optional threading.Event — if set, abort the turn.
 
         Returns:
             dict with:
-                'reply':       Full text response from Gemini
-                'transcript':  User's speech transcription (if available)
-                'tool_calls':  List of tool call results (if any)
+                'input_transcript':  User's speech transcription
+                'output_transcript': Gemini's response transcription
+                'tool_calls':        List of tool call results (if any)
         """
         if not self._connected:
             await self.connect()
 
-        reply_parts = []
-        transcript_parts = []
+        input_transcript_parts = []
+        output_transcript_parts = []
         tool_results = []
-        is_first_text = True
-        turn_complete = False
+        audio_chunks = []
+
+        # Open audio output stream for direct playback
+        output_device = _get_output_device()
+        audio_stream = sd.OutputStream(
+            samplerate=self.OUTPUT_SAMPLE_RATE,
+            channels=1,
+            dtype='int16',
+            blocksize=4096,
+            device=output_device,
+        )
+        audio_stream.start()
 
         # Start mic audio sender in background
-        audio_task = asyncio.create_task(self._stream_audio(stop_event))
+        audio_send_task = asyncio.create_task(self._stream_audio(stop_event))
 
         try:
             async for msg in self._session.receive():
-                # Check for abort
                 if stop_event and stop_event.is_set():
                     break
 
-                # Text response from Gemini
-                if msg.text is not None:
-                    reply_parts.append(msg.text)
-                    if on_text_chunk:
-                        try:
-                            on_text_chunk(msg.text, is_first_text)
-                            is_first_text = False
-                        except Exception:
-                            pass
-
-                # User speech transcription
+                # Audio response from Gemini — play directly
                 if hasattr(msg, 'server_content') and msg.server_content:
                     sc = msg.server_content
+
+                    # Audio data in model turn
+                    if hasattr(sc, 'model_turn') and sc.model_turn:
+                        for part in sc.model_turn.parts:
+                            if hasattr(part, 'inline_data') and part.inline_data is not None:
+                                pcm_data = part.inline_data.data
+                                if pcm_data:
+                                    # Convert bytes to int16 numpy array and play
+                                    samples = np.frombuffer(pcm_data, dtype=np.int16)
+                                    audio_stream.write(samples.reshape(-1, 1))
+                                    audio_chunks.append(pcm_data)
+                                    if on_audio_chunk:
+                                        try:
+                                            on_audio_chunk(pcm_data)
+                                        except Exception:
+                                            pass
+
+                    # User speech transcription
                     if hasattr(sc, 'input_transcription') and sc.input_transcription:
                         t = sc.input_transcription
                         if hasattr(t, 'text') and t.text:
-                            transcript_parts.append(t.text)
-                            if on_transcript:
+                            input_transcript_parts.append(t.text)
+                            if on_input_transcript:
                                 try:
-                                    on_transcript(t.text)
+                                    on_input_transcript(t.text)
                                 except Exception:
                                     pass
-                    # Check for turn_complete signal
+
+                    # Gemini's own response transcription
+                    if hasattr(sc, 'output_transcription') and sc.output_transcription:
+                        t = sc.output_transcription
+                        if hasattr(t, 'text') and t.text:
+                            output_transcript_parts.append(t.text)
+                            if on_output_transcript:
+                                try:
+                                    on_output_transcript(t.text)
+                                except Exception:
+                                    pass
+
+                    # Turn complete
                     if hasattr(sc, 'turn_complete') and sc.turn_complete:
-                        turn_complete = True
                         break
 
-                # Tool/function calls from Gemini
+                # Tool/function calls
                 if hasattr(msg, 'tool_call') and msg.tool_call:
                     result = await self._handle_tool_call(msg.tool_call)
                     if result:
@@ -219,27 +252,34 @@ class GeminiLiveSession:
         except Exception as e:
             queue_message(f"GEMINI_LIVE: Error during turn: {e}")
         finally:
-            # Stop audio streaming
-            audio_task.cancel()
+            # Stop mic streaming
+            audio_send_task.cancel()
             try:
-                await audio_task
+                await audio_send_task
             except asyncio.CancelledError:
                 pass
+            # Close audio output
+            try:
+                audio_stream.stop()
+                audio_stream.close()
+            except Exception:
+                pass
 
-        full_reply = ''.join(reply_parts)
-        full_transcript = ' '.join(transcript_parts)
+        input_text = ' '.join(input_transcript_parts)
+        output_text = ' '.join(output_transcript_parts)
 
-        queue_message(f"GEMINI_LIVE: Turn complete — reply={full_reply[:80]!r}{'...' if len(full_reply)>80 else ''}")
-        if full_transcript:
-            queue_message(f"GEMINI_LIVE: Transcript: {full_transcript[:120]}")
+        if input_text:
+            queue_message(f"GEMINI_LIVE: User said: {input_text[:120]}")
+        if output_text:
+            queue_message(f"GEMINI_LIVE: Gemini said: {output_text[:120]}")
 
         return {
-            'reply': full_reply,
-            'transcript': full_transcript,
+            'input_transcript': input_text,
+            'output_transcript': output_text,
             'tool_calls': tool_results,
         }
 
-    # ── Audio streaming ──────────────────────────────────────────
+    # ── Audio input streaming ────────────────────────────────────
 
     async def _stream_audio(self, stop_event=None):
         """Read from shared mic hub and stream PCM to Gemini."""
@@ -247,25 +287,19 @@ class GeminiLiveSession:
 
         CHUNK_FRAMES = 1600  # 100ms at 16kHz
         AUDIO_MIME = "audio/pcm;rate=16000"
-
         loop = asyncio.get_event_loop()
 
         def _read_mic_chunk(mic):
-            """Blocking mic read — run in executor."""
             data, _ = mic.read(CHUNK_FRAMES)
-            # Convert to int16 PCM bytes
             if data.dtype != np.int16:
                 data = np.clip(data * 32768, -32768, 32767).astype(np.int16)
             return data.tobytes()
 
         with ResamplingInputStream(dtype="int16") as mic:
-            # Flush stale audio before starting
             mic.flush()
-
             while True:
                 if stop_event and stop_event.is_set():
                     break
-
                 try:
                     audio_bytes = await loop.run_in_executor(None, _read_mic_chunk, mic)
                     await self._session.send_realtime_input(
@@ -274,7 +308,7 @@ class GeminiLiveSession:
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
-                    queue_message(f"GEMINI_LIVE: Audio stream error: {e}")
+                    queue_message(f"GEMINI_LIVE: Audio send error: {e}")
                     break
 
     # ── Tool/function calling ────────────────────────────────────
@@ -293,7 +327,6 @@ class GeminiLiveSession:
                 req_params = meta.get("required_params", [])
                 description = meta.get("description", f"Execute the {name} skill")
 
-                # Build parameter schema from required_params
                 properties = {}
                 required = []
                 for param in req_params:
@@ -303,10 +336,7 @@ class GeminiLiveSession:
                     }
                     required.append(param)
 
-                params_schema = {
-                    "type": "object",
-                    "properties": properties,
-                }
+                params_schema = {"type": "object", "properties": properties}
                 if required:
                     params_schema["required"] = required
 
@@ -321,7 +351,6 @@ class GeminiLiveSession:
             if declarations:
                 return [_types.Tool(function_declarations=declarations)]
             return None
-
         except Exception as e:
             queue_message(f"GEMINI_LIVE: Failed to build tools: {e}")
             return None
@@ -336,7 +365,6 @@ class GeminiLiveSession:
             for fc in tool_call.function_calls:
                 func_name = fc.name
                 parameters = dict(fc.args) if fc.args else {}
-
                 queue_message(f"GEMINI_LIVE: Tool call: {func_name}({parameters})")
 
                 if skills and skills.has_skill(func_name):
@@ -351,26 +379,17 @@ class GeminiLiveSession:
                     result_str = str(result) if result else "Done"
                 else:
                     result_str = f"Unknown skill: {func_name}"
-                    queue_message(f"GEMINI_LIVE: Unknown tool: {func_name}")
 
-                results.append({
-                    "name": func_name,
-                    "result": result_str,
-                })
+                results.append({"name": func_name, "result": result_str})
 
-                # Send result back to Gemini
                 response = _types.FunctionResponse(
                     name=func_name,
                     response={"result": result_str},
                     id=fc.id,
                 )
-                await self._session.send_tool_response(
-                    function_responses=response,
-                )
-                queue_message(f"GEMINI_LIVE: Tool response sent for {func_name}")
+                await self._session.send_tool_response(function_responses=response)
 
             return results
-
         except Exception as e:
             queue_message(f"GEMINI_LIVE: Tool call error: {e}")
             return None
@@ -378,15 +397,13 @@ class GeminiLiveSession:
     # ── System prompt ────────────────────────────────────────────
 
     def _build_system_prompt(self):
-        """Build a system prompt from the character config and skills."""
+        """Build a system prompt from the character config."""
         parts = []
 
-        # Character system prompt
         sys_prompt = CONFIG['LLM'].get('systemprompt', '')
         if sys_prompt:
             parts.append(sys_prompt)
 
-        # Character personality from character card
         try:
             from modules.module_llm import character_manager
             if character_manager:
@@ -401,15 +418,11 @@ class GeminiLiveSession:
         except Exception:
             pass
 
-        # User info
         user_name = CONFIG['CHAR'].get('user_name', 'User')
         parts.append(f"The user's name is {user_name}.")
 
-        # Response format instruction
         parts.append(
-            "Respond naturally in conversation. Keep responses concise and conversational "
-            "since they will be spoken aloud via text-to-speech. "
-            "Avoid markdown formatting, bullet points, or overly long responses."
+            "Respond naturally in conversation. Keep responses concise and conversational."
         )
 
         return "\n\n".join(parts)
@@ -448,26 +461,24 @@ def close_session():
             _session_instance = None
 
 
-def run_gemini_live_turn(on_text_chunk=None, on_transcript=None, stop_event=None):
+def run_gemini_live_turn(on_input_transcript=None, on_output_transcript=None,
+                         stop_event=None):
     """Synchronous wrapper: run one conversation turn with Gemini Live.
 
-    This is the main entry point called from module_main.py.
-    Blocks until Gemini completes its response.
-
-    Args:
-        on_text_chunk: Callback(text, is_first) for streaming text to TTS.
-        on_transcript: Callback(text) for user speech transcription.
-        stop_event:    threading.Event to abort the turn.
+    Main entry point called from module_main.py after wake word.
+    Streams mic audio to Gemini, plays Gemini's audio response directly.
 
     Returns:
-        dict with 'reply', 'transcript', 'tool_calls' — or None on error.
+        dict with 'input_transcript', 'output_transcript', 'tool_calls'
+        or None on error.
     """
     try:
         session = get_session()
         loop = asyncio.new_event_loop()
         try:
             result = loop.run_until_complete(
-                _run_turn_async(session, on_text_chunk, on_transcript, stop_event)
+                _run_turn_async(session, on_input_transcript,
+                                on_output_transcript, stop_event)
             )
             return result
         finally:
@@ -479,12 +490,13 @@ def run_gemini_live_turn(on_text_chunk=None, on_transcript=None, stop_event=None
         return None
 
 
-async def _run_turn_async(session, on_text_chunk, on_transcript, stop_event):
+async def _run_turn_async(session, on_input_transcript, on_output_transcript,
+                          stop_event):
     """Async helper: connect if needed, then run a turn."""
     if not session.is_connected:
         await session.connect()
     return await session.run_turn(
-        on_text_chunk=on_text_chunk,
-        on_transcript=on_transcript,
+        on_input_transcript=on_input_transcript,
+        on_output_transcript=on_output_transcript,
         stop_event=stop_event,
     )

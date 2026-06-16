@@ -249,6 +249,9 @@ def _prepare_request_data(llm_backend, prompt, image_b64=None):
     elif llm_backend == "deepinfra":
         url = f"{CONFIG['LLM']['base_url']}/v1/openai/chat/completions"
         model = CONFIG['LLM']['openai_model']
+    elif llm_backend == "gemini":
+        url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        model = CONFIG['LLM']['gemini_model']
     else:
         url = f"{CONFIG['LLM']['base_url']}/v1/chat/completions"
         model = CONFIG['LLM']['other_model']
@@ -265,7 +268,7 @@ def _prepare_request_data(llm_backend, prompt, image_b64=None):
         "stream": True
     }
 
-    if llm_backend in ["openai", "grok", "deepinfra"]:
+    if llm_backend in ["openai", "grok", "deepinfra", "gemini"]:
         data["response_format"] = {"type": "json_object"}
     else:
         if CONFIG['LLM'].get('json_mode', True):
