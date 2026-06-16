@@ -314,6 +314,7 @@ def process_completion(prompt, image_b64=None):
         llm_backend = CONFIG['LLM']['llm_backend']
         url, data = _prepare_request_data(llm_backend, built_prompt, image_b64=image_b64)
 
+        queue_message(f"DEBUG LLM: backend={llm_backend}, model={data.get('model')}, url={url}")
         response = _http_session.post(url, headers=headers, json=data, stream=True)
         response.raise_for_status()
         _t_first_byte = None
@@ -364,10 +365,12 @@ def process_completion(prompt, image_b64=None):
             try:
                 bot_reply = _extract_text(response.json(), True)
             except Exception:
+                queue_message("DEBUG LLM: No content from streaming or fallback")
                 return None
         else:
             bot_reply = full_content.strip()
 
+        queue_message(f"DEBUG LLM: Raw response ({len(bot_reply)} chars): {bot_reply[:300]}")
         result = llm_parse_response(bot_reply)
         _t_parse = time.perf_counter()
 
