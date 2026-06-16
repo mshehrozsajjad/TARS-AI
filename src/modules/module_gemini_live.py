@@ -176,11 +176,38 @@ class GeminiLiveSession:
         input_transcript_parts = []
         output_transcript_parts = []
         tool_results = []
-        # Accumulate audio chunks into a buffer, play in batches using sd.play()
-        # (same approach as module_tts.py — sd.play() works on USB devices,
-        #  sd.OutputStream does not on some ALSA configurations)
         output_device = _get_output_device()
-        _audio_buffer = []  # accumulate resampled int16 samples
+
+        # Audio playback queue — chunks are resampled and queued here,
+        # a background thread plays them via sd.play() (avoids blocking async loop)
+        import queue
+        _play_queue = queue.Queue()
+        _play_done = threading.Event()
+
+        def _playback_worker():
+            """Background thread: plays audio chunks via sd.play()."""
+            while not _play_done.is_set():
+                try:
+                    chunk = _play_queue.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                if chunk is None:  # poison pill
+                    break
+                try:
+                    audio_float = chunk / 32768.0
+                    max_val = np.max(np.abs(audio_float))
+                    if max_val > 0:
+                        audio_float = audio_float / max_val
+                    sd.play(audio_float.astype(np.float32),
+                            self.PLAYBACK_RATE, device=output_device)
+                    sd.wait()
+                except Exception as e:
+                    queue_message(f"GEMINI_LIVE: Playback error: {e}")
+
+        playback_thread = threading.Thread(target=_playback_worker, daemon=True)
+        playback_thread.start()
+
+        _audio_buffer = []  # accumulate resampled samples
 
         # Start mic audio sender in background
         audio_send_task = asyncio.create_task(self._stream_audio(stop_event))
@@ -190,17 +217,16 @@ class GeminiLiveSession:
                 if stop_event and stop_event.is_set():
                     break
 
-                # Audio response from Gemini — accumulate and play
+                # Audio response from Gemini
                 if hasattr(msg, 'server_content') and msg.server_content:
                     sc = msg.server_content
 
-                    # Audio data in model turn
                     if hasattr(sc, 'model_turn') and sc.model_turn:
                         for part in sc.model_turn.parts:
                             if hasattr(part, 'inline_data') and part.inline_data is not None:
                                 pcm_data = part.inline_data.data
                                 if pcm_data:
-                                    # Convert 24kHz PCM to float, resample to 16kHz
+                                    # Resample 24kHz → 16kHz
                                     samples = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float64)
                                     ratio = self.PLAYBACK_RATE / self.GEMINI_SAMPLE_RATE
                                     new_len = int(len(samples) * ratio)
@@ -208,20 +234,12 @@ class GeminiLiveSession:
                                     resampled = np.interp(indices, np.arange(len(samples)), samples)
                                     _audio_buffer.append(resampled)
 
-                                    # Play in chunks (~200ms worth = 3200 samples at 16kHz)
-                                    total_buffered = sum(len(c) for c in _audio_buffer)
-                                    if total_buffered >= 3200:
+                                    # Flush to playback thread every ~200ms
+                                    total = sum(len(c) for c in _audio_buffer)
+                                    if total >= 3200:
                                         merged = np.concatenate(_audio_buffer)
                                         _audio_buffer.clear()
-                                        # Normalize and play via sd.play()
-                                        audio_float = merged / 32768.0
-                                        max_val = np.max(np.abs(audio_float))
-                                        if max_val > 0:
-                                            audio_float = audio_float / max_val
-                                        sd.play(audio_float.astype(np.float32),
-                                                self.PLAYBACK_RATE,
-                                                device=output_device)
-                                        sd.wait()
+                                        _play_queue.put(merged)
 
                     # User speech transcription
                     if hasattr(sc, 'input_transcription') and sc.input_transcription:
@@ -265,19 +283,16 @@ class GeminiLiveSession:
             except asyncio.CancelledError:
                 pass
 
-            # Play any remaining buffered audio
+            # Flush remaining audio buffer
             if _audio_buffer:
-                try:
-                    merged = np.concatenate(_audio_buffer)
-                    audio_float = merged / 32768.0
-                    max_val = np.max(np.abs(audio_float))
-                    if max_val > 0:
-                        audio_float = audio_float / max_val
-                    sd.play(audio_float.astype(np.float32),
-                            self.PLAYBACK_RATE, device=output_device)
-                    sd.wait()
-                except Exception:
-                    pass
+                merged = np.concatenate(_audio_buffer)
+                _play_queue.put(merged)
+                _audio_buffer.clear()
+
+            # Signal playback thread to finish and wait
+            _play_queue.put(None)
+            _play_done.set()
+            playback_thread.join(timeout=10)
 
         input_text = ' '.join(input_transcript_parts)
         output_text = ' '.join(output_transcript_parts)

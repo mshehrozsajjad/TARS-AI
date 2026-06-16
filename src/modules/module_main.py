@@ -90,18 +90,19 @@ def wake_word_callback(wake_response):
     except Exception:
         pass
 
+    # In Gemini Live mode, skip the wake response entirely — no text, no audio.
+    conversation_mode = CONFIG.get("GEMINI_LIVE", {}).get("conversation_mode", "standard")
+    if conversation_mode == "gemini_live":
+        if ui_manager:
+            ui_manager.deactivate_screensaver()
+        set_tars_state(TarsState.LISTENING)
+        return
+
     # Deactivate screensaver when wake word is detected
     if ui_manager:
         ui_manager.deactivate_screensaver()
         character_name = CONFIG['CHAR']['character_name']
         ui_manager.update_data(character_name, wake_response, character_name)
-
-    # In Gemini Live mode, skip the TTS wake response — Gemini handles all audio.
-    # Just beep (via indicators) and go straight to listening.
-    conversation_mode = CONFIG.get("GEMINI_LIVE", {}).get("conversation_mode", "standard")
-    if conversation_mode == "gemini_live":
-        set_tars_state(TarsState.LISTENING)
-        return
 
     set_tars_state(TarsState.TALKING)
 
