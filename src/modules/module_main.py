@@ -228,7 +228,7 @@ def utterance_callback(message):
                 return
 
             # Stream to OpenGL UI (update last message in-place)
-            if ui_manager:
+            if ui_manager and hasattr(ui_manager, 'update_streaming_data'):
                 ui_manager.update_streaming_data(clean_total)
 
             # Stream new text to web UI (only if user is on webui)
@@ -360,7 +360,7 @@ def utterance_callback(message):
             pass
 
         # Finalize the streaming message with the complete reply
-        if ui_manager:
+        if ui_manager and hasattr(ui_manager, 'update_streaming_data'):
             ui_manager.update_streaming_data(reply)
 
         # Handle side effects (vision/search/photo run inline, others in background)
@@ -427,7 +427,7 @@ def utterance_callback(message):
             followup_clean = re.sub(r'[^a-zA-Z0-9\s.,?!;:"\'-<>]', '', _followup_reply)
             # Update OpenGL UI with follow-up content
             set_tars_state(TarsState.TALKING)
-            if ui_manager:
+            if ui_manager and hasattr(ui_manager, 'update_streaming_data'):
                 ui_manager.update_streaming_data(_followup_reply)
             if stt_manager:
                 stt_manager.start_bargein_monitor(tts_text=followup_clean)
