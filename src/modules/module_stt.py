@@ -82,8 +82,11 @@ if CAPABILITIES is None or (CAPABILITIES.allowed_wake and "atomik" in CAPABILITI
     except ImportError:
         pass
 
-# Sherpa-ONNX (Pi5, Pi4)
-if CAPABILITIES is None or (CAPABILITIES.allowed_stt and "sherpa-onnx" in CAPABILITIES.allowed_stt):
+# Sherpa-ONNX (Pi5, Pi4, or any profile using it for VAD/denoising)
+if CAPABILITIES is None or (
+    (CAPABILITIES.allowed_stt and "sherpa-onnx" in CAPABILITIES.allowed_stt) or
+    (CAPABILITIES.allowed_vad and "sherpa-onnx" in CAPABILITIES.allowed_vad)
+):
     try:
         import sherpa_onnx as _sherpa_onnx
         sherpa_onnx = _sherpa_onnx
