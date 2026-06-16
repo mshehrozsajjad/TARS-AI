@@ -1,157 +1,99 @@
 """
 Module: Gladia STT
-Speech-to-text using Gladia's live WebSocket API.
+Speech-to-text using the official Gladia SDK.
 
-Records audio using the existing VAD pipeline (same as OpenAI STT),
-then streams the recorded audio to Gladia for transcription.
-This gives us the battle-tested silence detection, amplification,
-and noise filtering from the main STT module.
+Uses the sync SDK client which manages HTTP session creation
+and WebSocket connection internally.
 
 Used as an STT processor option in module_stt.py.
 """
 
 import os
-import json
-import asyncio
+import threading
 import numpy as np
 
-from modules.module_config import load_config
 from modules.module_messageQue import queue_message
-
-CONFIG = load_config()
 
 
 def transcribe_audio(audio_data, sample_rate=16000):
     """Send recorded audio to Gladia and return the transcript.
 
     Args:
-        audio_data: numpy int16 array of recorded audio (already amplified).
-        sample_rate: sample rate of the audio (default 16000).
+        audio_data: numpy int16 array of recorded audio.
+        sample_rate: sample rate (default 16000).
 
     Returns:
         str: Transcript text, or None.
     """
     api_key = os.getenv("GLADIA_API_KEY", "")
     if not api_key:
-        queue_message("ERROR: GLADIA_API_KEY not set in .env")
+        print("[GLADIA] ERROR: GLADIA_API_KEY not set", flush=True)
         return None
 
     try:
-        import websockets
-    except ImportError:
-        queue_message("ERROR: pip install websockets")
-        return None
-
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(
-            _send_and_transcribe(api_key, websockets, audio_data, sample_rate)
+        from gladiaio_sdk import (
+            GladiaClient,
+            LiveV2InitRequest,
+            LiveV2LanguageConfig,
+            LiveV2MessagesConfig,
+            LiveV2WebSocketMessage,
+            LiveV2EndedMessage,
+            LiveV2InitResponse,
         )
-    except Exception as e:
-        queue_message(f"ERROR: Gladia STT failed: {e}")
+    except ImportError:
+        print("[GLADIA] ERROR: pip install gladiaio-sdk", flush=True)
         return None
-    finally:
-        loop.close()
 
+    client = GladiaClient(api_key=api_key)
+    live = client.live()
 
-async def _send_and_transcribe(api_key, websockets_mod, audio_data, sample_rate):
-    """Create session, send audio, return transcript."""
-    import aiohttp
-
-    # Create session
-    async with aiohttp.ClientSession() as http:
-        async with http.post(
-            "https://api.gladia.io/v2/live",
-            headers={
-                "Content-Type": "application/json",
-                "x-gladia-key": api_key,
-            },
-            json={
-                "model": "solaria-1",
-                "encoding": "wav/pcm",
-                "sample_rate": sample_rate,
-                "bit_depth": 16,
-                "channels": 1,
-                "language_config": {"languages": ["en"], "code_switching": False},
-                "messages_config": {
-                    "receive_partial_transcripts": False,
-                    "receive_final_transcripts": True,
-                },
-            },
-        ) as resp:
-            if resp.status not in (200, 201):
-                queue_message(f"GLADIA: Session failed ({resp.status})")
-                return None
-            data = await resp.json()
-            ws_url = data.get("url")
-            if not ws_url:
-                return None
-
-    # Connect and send audio
     final_transcript = None
-    done = asyncio.Event()
+    done = threading.Event()
 
-    queue_message(f"GLADIA: Connecting to session...")
-    ws = await websockets_mod.connect(ws_url)
-    queue_message(f"GLADIA: Connected, sending {len(audio_data)} samples ({len(audio_data)/sample_rate:.1f}s)")
-    try:
-        # Receiver
-        async def _recv():
-            nonlocal final_transcript
-            try:
-                async for raw in ws:
-                    msg = json.loads(raw)
-                    if msg.get("type") == "transcript" and msg.get("data", {}).get("is_final"):
-                        text = msg.get("data", {}).get("utterance", {}).get("text", "").strip()
-                        if text:
-                            final_transcript = text
-                            done.set()
-                    elif msg.get("type") == "error":
-                        queue_message(f"GLADIA: {msg}")
-                        done.set()
-            except Exception:
+    session = live.start_session(
+        LiveV2InitRequest(
+            model="solaria-1",
+            encoding="wav/pcm",
+            sample_rate=sample_rate,
+            bit_depth=16,
+            channels=1,
+            language_config=LiveV2LanguageConfig(languages=["en"]),
+            messages_config=LiveV2MessagesConfig(
+                receive_partial_transcripts=False,
+            ),
+        )
+    )
+
+    @session.on("message")
+    def on_message(msg: LiveV2WebSocketMessage):
+        nonlocal final_transcript
+        if msg.type == "transcript" and msg.data.is_final:
+            text = msg.data.utterance.text.strip()
+            if text:
+                final_transcript = text
                 done.set()
 
-        recv_task = asyncio.create_task(_recv())
+    @session.on("error")
+    def on_error(err: Exception):
+        print(f"[GLADIA] Error: {err}", flush=True)
+        done.set()
 
-        # Send audio in chunks (1600 samples = 100ms at 16kHz)
-        pcm_bytes = audio_data.tobytes()
-        chunk_size = 3200  # 1600 samples * 2 bytes per int16
-        for i in range(0, len(pcm_bytes), chunk_size):
-            chunk = pcm_bytes[i:i + chunk_size]
-            try:
-                await ws.send(chunk)
-            except Exception:
-                break
-            # Small delay to simulate real-time pace (prevents overwhelming the API)
-            await asyncio.sleep(0.05)
+    @session.once("ended")
+    def on_ended(msg: LiveV2EndedMessage):
+        done.set()
 
-        # Signal end
-        try:
-            await ws.send(json.dumps({"type": "stop_recording"}))
-        except Exception:
-            pass
+    # Send audio in chunks
+    pcm_bytes = audio_data.tobytes()
+    chunk_size = 3200  # 100ms at 16kHz (1600 samples * 2 bytes)
+    for i in range(0, len(pcm_bytes), chunk_size):
+        session.send_audio(pcm_bytes[i:i + chunk_size])
 
-        # Wait for transcript
-        try:
-            await asyncio.wait_for(done.wait(), timeout=10.0)
-        except asyncio.TimeoutError:
-            queue_message("GLADIA: Timeout waiting for transcript")
+    session.stop_recording()
 
-        recv_task.cancel()
-        try:
-            await recv_task
-        except asyncio.CancelledError:
-            pass
-
-    finally:
-        try:
-            await ws.close()
-        except Exception:
-            pass
+    # Wait for final transcript
+    done.wait(timeout=10.0)
 
     if final_transcript:
-        queue_message(f"GLADIA: Transcript: {final_transcript}")
-    else:
-        queue_message("GLADIA: No transcript received")
+        print(f"[GLADIA] {final_transcript}", flush=True)
+
     return final_transcript
