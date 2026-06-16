@@ -616,7 +616,7 @@ class STTManager:
                 if not detected_speech and silent_frames >= max_silent:
                     _, clear_bar = self._get_progress_bar()
                     clear_bar()
-                    queue_message(f"DEBUG REC: No speech detected after {silent_frames} frames, giving up")
+                    print(f"[DEBUG] No speech after {silent_frames} frames, giving up", flush=True)
                     return None, 0
 
                 # Post-speech: VAD signaled end of turn
@@ -639,7 +639,7 @@ class STTManager:
                             pre_roll_buffer.pop(0)
                 else:
                     if speech_frames == 0:
-                        queue_message(f"DEBUG REC: Speech detected (vad={vad_method})")
+                        print(f"[DEBUG] Speech detected! (vad={vad_method})", flush=True)
                     if speech_frames == 0 and pre_roll_buffer:
                         pre_roll_added = len(pre_roll_buffer)
                         audio_chunks.extend(pre_roll_buffer)
@@ -1102,7 +1102,7 @@ class STTManager:
         """Record audio with existing VAD, then send to Gladia for transcription."""
         from modules.module_gladia import transcribe_audio
 
-        queue_message("DEBUG GLADIA: Starting recording...")
+        print(f"[DEBUG] Gladia: starting recording, vad={self.vadmethod}", flush=True)
         RATE = 16000
         chunks, speech_frames = self._record_audio_chunks()
         if chunks is None:
