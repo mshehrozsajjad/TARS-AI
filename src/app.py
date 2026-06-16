@@ -349,6 +349,13 @@ if __name__ == "__main__":
     stt_manager.set_post_utterance_callback(post_utterance_callback)
     stt_manager.set_preemptive_llm_callback(process_completion)
 
+    # Register Gemini Live callback if conversation_mode is gemini_live
+    conversation_mode = CONFIG.get("GEMINI_LIVE", {}).get("conversation_mode", "standard")
+    if conversation_mode == "gemini_live":
+        from modules.module_main import gemini_live_callback
+        stt_manager.set_gemini_live_callback(gemini_live_callback)
+        queue_message("LOAD: Gemini Live mode enabled — bypassing local STT")
+
     # === Speaker ID (optional) ===
     if CONFIG['STT'].get('speaker_id_enabled', 'False').lower() == 'true':
         try:

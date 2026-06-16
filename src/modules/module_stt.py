@@ -183,6 +183,7 @@ class STTManager:
         self.utterance_callback: Optional[Callable[[str], None]] = None
         self.post_utterance_callback: Optional[Callable[[], None]] = None
         self.preemptive_llm_callback: Optional[Callable[[str], object]] = None  # fires LLM early
+        self.gemini_live_callback: Optional[Callable[[], None]] = None  # Gemini Live mode
 
         # Wake word and model settings
         self.WAKE_WORD = config.get("STT", {}).get("wake_word", "hey tar").lower()
@@ -737,7 +738,12 @@ class STTManager:
                     self.sherpa_vad.reset()
                 # Check again if paused before transcribing
                 if not self.is_paused():
-                    self._transcribe_utterance()
+                    # In Gemini Live mode, skip local STT and route to Gemini callback
+                    if self.gemini_live_callback is not None:
+                        queue_message("DEBUG: Routing to Gemini Live mode")
+                        self.gemini_live_callback()
+                    else:
+                        self._transcribe_utterance()
         queue_message("INFO: STT Manager stopped.")
 
     # === Transcription Dispatch ===
@@ -1827,6 +1833,10 @@ class STTManager:
 
     def set_preemptive_llm_callback(self, callback: Callable[[str], object]):
         self.preemptive_llm_callback = callback
+
+    def set_gemini_live_callback(self, callback: Callable[[], None]):
+        """Set callback for Gemini Live mode — called instead of _transcribe_utterance."""
+        self.gemini_live_callback = callback
 
     # === Barge-In Monitoring ===
 

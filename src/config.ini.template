@@ -54,6 +54,20 @@ json_mode = True
 # Token counting encoding — only change if token errors occur (cl100k_base works for most models)
 override_encoding_model = cl100k_base
 
+[GEMINI_LIVE]
+# Conversation mode: standard (STT→LLM→TTS) | gemini_live (audio→Gemini Live API→TTS)
+# standard = existing pipeline with separate STT, LLM, and TTS steps
+# gemini_live = stream raw audio to Google Gemini Live API, bypassing local STT
+conversation_mode = standard
+# Gemini Live model name
+model = gemini-3.1-flash-live-preview
+# VAD silence duration in ms — how long Gemini waits after speech stops (500–1500)
+vad_silence_ms = 700
+# VAD prefix padding in ms — audio captured before speech starts (100–500)
+vad_prefix_ms = 200
+# Context window compression trigger in tokens (higher = more context retained)
+context_trigger_tokens = 32000
+
 [STT]
 # Spoken language (use openai stt_processor for non-English)
 language = english

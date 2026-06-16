@@ -560,7 +560,15 @@ def load_config():
             "battery_capacity_mAh": int(config.get('BATTERY', 'battery_capacity_mAh', fallback='3000')),
             "battery_initial_voltage": float(config.get('BATTERY', 'battery_initial_voltage', fallback='12')),
             "battery_cutoff_voltage": float(config.get('BATTERY', 'battery_cutoff_voltage', fallback='10')),
-        }
+        },
+        "GEMINI_LIVE": {
+            "conversation_mode": config.get('GEMINI_LIVE', 'conversation_mode', fallback='standard'),
+            "model": config.get('GEMINI_LIVE', 'model', fallback='gemini-3.1-flash-live-preview'),
+            "temperature": config.getfloat('GEMINI_LIVE', 'temperature', fallback=float(config.get('LLM', 'temperature', fallback='0.8'))),
+            "vad_silence_ms": config.getint('GEMINI_LIVE', 'vad_silence_ms', fallback=700),
+            "vad_prefix_ms": config.getint('GEMINI_LIVE', 'vad_prefix_ms', fallback=200),
+            "context_trigger_tokens": config.getint('GEMINI_LIVE', 'context_trigger_tokens', fallback=32000),
+        },
     }
 
     config_dict = apply_device_overrides(config_dict, capabilities)

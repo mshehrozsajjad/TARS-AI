@@ -529,6 +529,186 @@ def utterance_callback(message):
         set_tars_state(TarsState.LISTENING)
         queue_message(f"ERROR: {e}")
 
+def gemini_live_callback():
+    """
+    Handle a conversation turn using Gemini Live API.
+    Called after wake word when conversation_mode = 'gemini_live'.
+    Streams mic audio to Gemini, receives text, plays via TTS.
+    """
+    try:
+        import modules.module_speed as speed
+        speed.mark_utterance_start()
+        speed.start('total')
+
+        from modules.module_gemini_live import run_gemini_live_turn
+
+        # Deactivate screensaver
+        if ui_manager:
+            ui_manager.deactivate_screensaver()
+
+        set_tars_state(TarsState.LISTENING)
+        character_name = CONFIG['CHAR']['character_name']
+
+        # Set up UI for streaming
+        if ui_manager:
+            ui_manager.update_data(character_name, "", character_name)
+
+        # Check if user is on WebUI
+        try:
+            from modules.module_router import get_active_route
+            _is_webui = get_active_route().get("source") == "webui"
+        except Exception:
+            _is_webui = False
+
+        # ── Sentence-pipeline TTS ─────────────────────────────────
+        _acc_text = ['']
+
+        def _apply_sanitize(text):
+            from modules.module_llm import _sanitize_for_tts
+            text = _sanitize_for_tts(text)
+            text = re.sub(r'[^a-zA-Z0-9\s.,?!;:"\'-<>]', '', text)
+            return text.strip()
+
+        def _on_first_play():
+            set_tars_state(TarsState.TALKING)
+            if stt_manager:
+                stt_manager.start_bargein_monitor(tts_text="")
+
+        pipeline = SentenceTTSPipeline(
+            CONFIG['TTS']['ttsoption'],
+            sanitize=_apply_sanitize,
+            on_first_play=_on_first_play,
+        )
+        pipeline.start()
+
+        def on_text_chunk(chunk, is_first):
+            """Called as Gemini streams text response."""
+            _acc_text[0] += chunk
+
+            # Stream to UI
+            if ui_manager:
+                ui_manager.update_streaming_data(_acc_text[0])
+
+            # Stream to web UI
+            if _is_webui:
+                try:
+                    from modules.module_chatui import stream_reply_token
+                    stream_reply_token(chunk)
+                except Exception:
+                    pass
+
+            # Update barge-in monitor
+            if stt_manager:
+                stt_manager.update_bargein_tts_text(_acc_text[0])
+
+            # Feed to TTS pipeline
+            pipeline.feed(chunk)
+
+            if is_first:
+                speed.mark_first_token()
+
+        def on_transcript(text):
+            """Called when Gemini transcribes user speech."""
+            user_name = CONFIG['CHAR'].get('user_name', 'User')
+            queue_message(f"GEMINI_LIVE: [{user_name}] {text}")
+            if ui_manager:
+                ui_manager.update_data(user_name, text, user_name)
+            if _is_webui:
+                try:
+                    from modules.module_chatui import push_user_message
+                    push_user_message(text, speaker_name=user_name)
+                except Exception:
+                    pass
+
+        # Notify web UI that streaming is starting
+        try:
+            from modules.module_chatui import begin_bot_stream
+            begin_bot_stream()
+        except Exception:
+            pass
+
+        # ── Run the Gemini Live turn ──────────────────────────────
+        set_tars_state(TarsState.THINKING)
+        result = run_gemini_live_turn(
+            on_text_chunk=on_text_chunk,
+            on_transcript=on_transcript,
+        )
+
+        # Flush remaining text to TTS
+        remaining = pipeline.remainder.strip()
+        if not remaining:
+            full_text = _acc_text[0].strip()
+            remaining = full_text[len(pipeline._fed_so_far):].strip() if hasattr(pipeline, '_fed_so_far') else ''
+        pipeline.finish(remaining=_apply_sanitize(remaining) if remaining else None)
+
+        if result is None:
+            pipeline.finish()
+            pipeline.join(timeout=5)
+            if stt_manager:
+                stt_manager.stop_bargein_monitor()
+            set_tars_state(TarsState.LISTENING)
+            return
+
+        reply = result.get('reply', '')
+        transcript = result.get('transcript', '')
+
+        # Finalize UI with complete reply
+        if ui_manager and reply:
+            ui_manager.update_streaming_data(reply)
+
+        # Wait for TTS pipeline to finish
+        pipeline.join(timeout=120)
+        if stt_manager:
+            stt_manager.stop_bargein_monitor()
+        was_interrupted = pipeline.interrupted
+
+        # After response finishes, return to LISTENING
+        if was_interrupted:
+            time.sleep(0.3)
+        set_tars_state(TarsState.LISTENING)
+
+        # Push final reply to web UI
+        try:
+            if _is_webui:
+                from modules.module_chatui import socketio
+                socketio.emit('bot_message', {'message': reply, 'audio_streamed': True})
+                socketio.emit('bot_audio_done', {})
+                socketio.emit('talking_state', {'talking': False})
+        except Exception:
+            pass
+
+        # Log summary
+        parts = [
+            f"mode=gemini_live",
+            f"transcript={transcript[:60]!r}" if transcript else "transcript=?",
+            f"end={'barge-in' if was_interrupted else 'complete'}",
+        ]
+        queue_message(f"ROUND: {' | '.join(parts)}")
+
+        # Speed profiling
+        total_dur = speed.stop('total')
+        if speed.enabled:
+            sp = [f"tts_play({speed.fmt(pipeline.play_time)})"]
+            sp.append(f"total({speed.fmt(total_dur)})")
+            queue_message(f"SPEED: {', '.join(sp)}")
+
+        # Save conversation to memory (background) if memory manager available
+        if memory_manager and transcript and reply:
+            import threading as _threading
+            def _save_mem():
+                try:
+                    memory_manager.write_longterm_memory(transcript, reply, None)
+                except Exception:
+                    pass
+            _threading.Thread(target=_save_mem, daemon=True).start()
+
+    except Exception as e:
+        set_tars_state(TarsState.LISTENING)
+        queue_message(f"ERROR: Gemini Live turn failed: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 def post_utterance_callback():
     """
     Restart listening for another utterance after handling the current one.
