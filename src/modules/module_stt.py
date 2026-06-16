@@ -758,6 +758,7 @@ class STTManager:
         """Transcribe the user's utterance using the selected STT processor."""
         try:
             if self.is_paused():
+                queue_message("DEBUG STT: Skipping transcription — paused")
                 return None
 
             processors = {
@@ -769,6 +770,7 @@ class STTManager:
                 "gladia": self._transcribe_with_gladia,
             }
             processor = self.config["STT"].get("stt_processor", "fastrtc")
+            queue_message(f"DEBUG STT: Dispatching to '{processor}'")
             transcribe_fn = processors.get(processor)
             if transcribe_fn is None:
                 queue_message(f"WARNING: Unknown STT processor '{processor}', falling back to FastRTC")
@@ -1096,6 +1098,7 @@ class STTManager:
         """Record audio with existing VAD, then send to Gladia for transcription."""
         from modules.module_gladia import transcribe_audio
 
+        queue_message("DEBUG GLADIA: Starting recording...")
         RATE = 16000
         chunks, speech_frames = self._record_audio_chunks()
         if chunks is None:
