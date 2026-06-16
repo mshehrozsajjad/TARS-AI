@@ -1087,14 +1087,23 @@ class STTManager:
         return self._emit_result(transcription)
 
     def _transcribe_with_gladia(self):
-        """Stream mic audio to Gladia for real-time transcription."""
-        from modules.module_gladia import transcribe_streaming
-        from modules.module_mic import ResamplingInputStream
+        """Record audio with existing VAD, then send to Gladia for transcription."""
+        from modules.module_gladia import transcribe_audio
 
-        with ResamplingInputStream(dtype="int16") as mic:
-            mic.flush()
-            transcript = transcribe_streaming(mic, max_duration=12.5)
+        RATE = 16000
+        chunks, speech_frames = self._record_audio_chunks()
+        if chunks is None:
+            return None
 
+        # Combine and amplify (same as OpenAI path)
+        audio_data = np.concatenate([self.amplify_audio(c) for c in chunks])
+
+        # Reject near-silent recordings
+        rms = np.sqrt(np.mean(audio_data.astype(np.float64) ** 2))
+        if rms < self.silence_threshold:
+            return None
+
+        transcript = transcribe_audio(audio_data, sample_rate=RATE)
         if not transcript:
             return None
         return self._emit_result(transcript)
