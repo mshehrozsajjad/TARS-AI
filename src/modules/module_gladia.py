@@ -2,12 +2,8 @@
 Module: Gladia Streaming STT
 Real-time speech-to-text using Gladia's WebSocket API.
 
-Streams mic audio to Gladia in real-time and returns the final
-transcript when the user stops speaking. Shows partial transcripts
-in real-time on the UI as the user speaks.
-
-Session is created once during wake word detection and reused
-across turns to avoid per-turn creation delay.
+Maintains a persistent WebSocket session that's reused across turns.
+Session is created once and kept alive — no per-turn creation overhead.
 
 Used as an STT processor option in module_stt.py.
 """
@@ -24,293 +20,284 @@ from modules.module_messageQue import queue_message
 
 CONFIG = load_config()
 
-_websockets = None
 
+class GladiaSession:
+    """Persistent Gladia live transcription session.
 
-def _ensure_deps():
-    global _websockets
-    if _websockets is not None:
-        return
-    try:
-        import websockets
-        _websockets = websockets
-    except ImportError:
-        raise ImportError(
-            "websockets package is required for Gladia STT. "
-            "Install it with: pip install websockets"
-        )
+    Runs its own asyncio event loop in a background thread.
+    The WebSocket stays connected between turns.
+    """
 
+    def __init__(self):
+        self._api_key = os.getenv("GLADIA_API_KEY", "")
+        self._ws = None
+        self._loop = None
+        self._thread = None
+        self._running = False
 
-# ── Persistent session ──────────────────────────────────────────────
-# Created during wake word, reused across turns until it drops.
+        # Communication between main thread and async loop
+        self._audio_queue = None       # main → async: audio bytes to send
+        self._transcript_final = None  # async → main: final transcript text
+        self._transcript_partial = None
+        self._done = threading.Event()
+        self._turn_active = threading.Event()
+        self._on_partial = None
 
-_session_ws = None
-_session_url = None
-_session_id = None
-_session_lock = threading.Lock()
-_session_ready = threading.Event()
+    def ensure_connected(self):
+        """Start the background thread and connect if not already running."""
+        if self._running and self._thread and self._thread.is_alive():
+            return True
 
+        if not self._api_key:
+            queue_message("ERROR: GLADIA_API_KEY not set")
+            return False
 
-def prepare_session():
-    """Create a Gladia session in background. Call from wake_word_callback."""
-    _ensure_deps()
-    threading.Thread(target=_create_session_sync, daemon=True).start()
+        self._running = True
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
 
+        # Wait for connection
+        for _ in range(50):  # 5 seconds max
+            if self._ws_connected:
+                return True
+            time.sleep(0.1)
 
-def _create_session_sync():
-    """Create session via HTTP and connect WebSocket."""
-    global _session_ws, _session_url, _session_id
+        queue_message("GLADIA: Connection timeout")
+        return False
 
-    api_key = os.getenv("GLADIA_API_KEY", "")
-    if not api_key:
-        return
+    @property
+    def _ws_connected(self):
+        return self._ws is not None
 
-    # Skip if we already have a live session
-    with _session_lock:
-        if _session_ws is not None:
-            try:
-                # Check if still open
-                if _session_ws.open:
-                    _session_ready.set()
-                    return
-            except Exception:
-                pass
-            _session_ws = None
+    def _run_loop(self):
+        """Background thread: runs the asyncio event loop."""
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        try:
+            self._loop.run_until_complete(self._session_loop())
+        except Exception as e:
+            queue_message(f"GLADIA: Session loop error: {e}")
+        finally:
+            self._running = False
+            self._loop.close()
 
-    try:
-        import requests
-        resp = requests.post(
-            "https://api.gladia.io/v2/live",
-            headers={
-                "Content-Type": "application/json",
-                "x-gladia-key": api_key,
-            },
-            json={
-                "model": "solaria-1",
-                "encoding": "wav/pcm",
-                "sample_rate": 16000,
-                "bit_depth": 16,
-                "channels": 1,
-                "language_config": {"languages": ["en"], "code_switching": False},
-                "messages_config": {
-                    "receive_partial_transcripts": True,
-                    "receive_final_transcripts": True,
-                },
-            },
-            timeout=5,
-        )
-        if resp.status_code not in (200, 201):
-            queue_message(f"GLADIA: Session creation failed ({resp.status_code})")
+    async def _session_loop(self):
+        """Main async loop: connect and handle turns until stopped."""
+        try:
+            import websockets
+        except ImportError:
+            queue_message("ERROR: pip install websockets")
             return
 
-        data = resp.json()
-        with _session_lock:
-            _session_url = data.get("url")
-            _session_id = data.get("id")
-        queue_message(f"GLADIA: Session {_session_id} ready")
-        _session_ready.set()
+        while self._running:
+            # Create session
+            ws_url = await self._create_session()
+            if not ws_url:
+                await asyncio.sleep(2)
+                continue
 
-    except Exception as e:
-        queue_message(f"GLADIA: Session creation error: {e}")
-
-
-def _get_or_create_session(api_key):
-    """Get the pre-created session URL or create one on the spot."""
-    global _session_url, _session_id
-
-    # Wait briefly for pre-created session
-    if _session_ready.wait(timeout=3.0):
-        with _session_lock:
-            if _session_url:
-                url, sid = _session_url, _session_id
-                # Don't clear — reuse for next turn by creating a new one
-                return url, sid
-
-    # Fallback: create synchronously
-    queue_message("GLADIA: Creating session (no pre-warm available)")
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(_create_session_async(api_key))
-    finally:
-        loop.close()
-
-
-async def _create_session_async(api_key):
-    """Create session via async HTTP."""
-    import aiohttp
-    async with aiohttp.ClientSession() as http:
-        async with http.post(
-            "https://api.gladia.io/v2/live",
-            headers={
-                "Content-Type": "application/json",
-                "x-gladia-key": api_key,
-            },
-            json={
-                "model": "solaria-1",
-                "encoding": "wav/pcm",
-                "sample_rate": 16000,
-                "bit_depth": 16,
-                "channels": 1,
-                "language_config": {"languages": ["en"], "code_switching": False},
-                "messages_config": {
-                    "receive_partial_transcripts": True,
-                    "receive_final_transcripts": True,
-                },
-            },
-        ) as resp:
-            if resp.status not in (200, 201):
-                return None, None
-            data = await resp.json()
-            return data.get("url"), data.get("id")
-
-
-# ── Main transcription function ──────────────────────────────────────
-
-def transcribe_streaming(mic_reader, on_partial=None, max_duration=12.5):
-    """Stream mic audio to Gladia and return the final transcript.
-
-    Args:
-        mic_reader:    ResamplingInputStream context (already entered).
-        on_partial:    Optional callback(text) for partial transcripts (UI display).
-        max_duration:  Max recording duration in seconds.
-
-    Returns:
-        str: Final transcript text, or None if nothing was said.
-    """
-    _ensure_deps()
-
-    api_key = os.getenv("GLADIA_API_KEY", "")
-    if not api_key:
-        queue_message("ERROR: GLADIA_API_KEY not set in .env")
-        return None
-
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(
-            _stream_and_transcribe(api_key, mic_reader, on_partial, max_duration)
-        )
-    except Exception as e:
-        queue_message(f"ERROR: Gladia transcription failed: {e}")
-        return None
-    finally:
-        loop.close()
-
-
-async def _stream_and_transcribe(api_key, mic_reader, on_partial, max_duration):
-    """Connect to Gladia, stream audio, show partials, return final transcript."""
-    global _session_url, _session_id
-
-    # Get session URL (pre-created or on-demand)
-    ws_url, session_id = _get_or_create_session(api_key)
-    if not ws_url:
-        queue_message("GLADIA: No session URL available")
-        return None
-
-    # Reset for next turn
-    _session_ready.clear()
-    with _session_lock:
-        _session_url = None
-        _session_id = None
-
-    final_transcript = None
-    transcript_event = asyncio.Event()
-
-    try:
-        ws = await _websockets.connect(ws_url)
-    except Exception as e:
-        queue_message(f"GLADIA: WebSocket connect failed: {e}")
-        return None
-
-    try:
-        # Background receiver
-        async def _receive():
-            nonlocal final_transcript
+            # Connect WebSocket
             try:
-                async for raw_msg in ws:
-                    msg = json.loads(raw_msg)
-                    msg_type = msg.get("type", "")
+                self._ws = await websockets.connect(ws_url)
+                queue_message("GLADIA: Session connected")
+            except Exception as e:
+                queue_message(f"GLADIA: WebSocket connect failed: {e}")
+                self._ws = None
+                await asyncio.sleep(2)
+                continue
 
-                    if msg_type == "transcript":
-                        is_final = msg.get("data", {}).get("is_final", False)
-                        text = msg.get("data", {}).get("utterance", {}).get("text", "").strip()
-
-                        if text and is_final:
-                            final_transcript = text
-                            queue_message(f"GLADIA: {text}")
-                            transcript_event.set()
-                        elif text and on_partial:
-                            try:
-                                on_partial(text)
-                            except Exception:
-                                pass
-
-                    elif msg_type == "error":
-                        queue_message(f"GLADIA: Error: {msg}")
-                        transcript_event.set()
-            except Exception:
-                transcript_event.set()
-
-        recv_task = asyncio.create_task(_receive())
-
-        # Stream mic audio
-        CHUNK_FRAMES = 1600  # 100ms at 16kHz
-        eloop = asyncio.get_event_loop()
-        max_chunks = int(max_duration * 10)
-        chunks_sent = 0
-        silence_count = 0
-        speech_detected = False
-        MAX_SILENCE_CHUNKS = 15  # 1.5s silence = done
-
-        for _ in range(max_chunks):
-            if transcript_event.is_set():
-                break
-
-            def _read():
-                data, _ = mic_reader.read(CHUNK_FRAMES)
-                if data.dtype != np.int16:
-                    data = np.clip(data * 32768, -32768, 32767).astype(np.int16)
-                return data
-
-            chunk = await eloop.run_in_executor(None, _read)
-
+            # Handle turns on this connection
             try:
-                await ws.send(chunk.tobytes())
-                chunks_sent += 1
-            except Exception:
-                break
+                await self._handle_connection()
+            except Exception as e:
+                queue_message(f"GLADIA: Connection error: {e}")
+            finally:
+                try:
+                    await self._ws.close()
+                except Exception:
+                    pass
+                self._ws = None
 
-            # Silence detection
-            rms = np.sqrt(np.mean(chunk.astype(np.float64) ** 2))
-            if rms > 500:
-                speech_detected = True
-                silence_count = 0
-            elif speech_detected:
-                silence_count += 1
-                if silence_count >= MAX_SILENCE_CHUNKS:
+            if not self._running:
+                break
+            queue_message("GLADIA: Reconnecting...")
+
+    async def _create_session(self):
+        """Create a Gladia live session, return WebSocket URL."""
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as http:
+                async with http.post(
+                    "https://api.gladia.io/v2/live",
+                    headers={
+                        "Content-Type": "application/json",
+                        "x-gladia-key": self._api_key,
+                    },
+                    json={
+                        "model": "solaria-1",
+                        "encoding": "wav/pcm",
+                        "sample_rate": 16000,
+                        "bit_depth": 16,
+                        "channels": 1,
+                        "language_config": {"languages": ["en"], "code_switching": False},
+                        "messages_config": {
+                            "receive_partial_transcripts": True,
+                            "receive_final_transcripts": True,
+                        },
+                    },
+                ) as resp:
+                    if resp.status not in (200, 201):
+                        queue_message(f"GLADIA: Session creation failed ({resp.status})")
+                        return None
+                    data = await resp.json()
+                    queue_message("GLADIA: Session ready")
+                    return data.get("url")
+        except Exception as e:
+            queue_message(f"GLADIA: Session creation error: {e}")
+            return None
+
+    async def _handle_connection(self):
+        """Handle the WebSocket connection — receive transcripts, wait for turns."""
+        recv_task = asyncio.create_task(self._receive_loop())
+        try:
+            # Stay alive until connection drops or we're stopped
+            while self._running:
+                # Wait for a turn to start
+                while self._running and not self._turn_active.is_set():
+                    await asyncio.sleep(0.05)
+
+                if not self._running:
                     break
 
-        # Signal end
+                # Process audio for this turn
+                await self._process_turn()
+
+        finally:
+            recv_task.cancel()
+            try:
+                await recv_task
+            except asyncio.CancelledError:
+                pass
+
+    async def _receive_loop(self):
+        """Continuously receive messages from Gladia."""
         try:
-            await ws.send(json.dumps({"type": "stop_recording"}))
+            async for raw in self._ws:
+                msg = json.loads(raw)
+                if msg.get("type") == "transcript":
+                    text = msg.get("data", {}).get("utterance", {}).get("text", "").strip()
+                    if not text:
+                        continue
+                    if msg["data"].get("is_final"):
+                        self._transcript_final = text
+                        self._done.set()
+                    else:
+                        self._transcript_partial = text
+                        if self._on_partial:
+                            try:
+                                self._on_partial(text)
+                            except Exception:
+                                pass
+                elif msg.get("type") == "error":
+                    queue_message(f"GLADIA: {msg}")
+                    self._done.set()
         except Exception:
-            pass
+            self._done.set()
+            raise  # Let _handle_connection catch it and reconnect
+
+    async def _process_turn(self):
+        """Send audio from queue until turn ends."""
+        while self._turn_active.is_set() and self._running:
+            try:
+                audio_bytes = self._audio_queue.get_nowait()
+            except Exception:
+                await asyncio.sleep(0.01)
+                continue
+
+            if audio_bytes is None:  # turn end signal
+                break
+
+            try:
+                await self._ws.send(audio_bytes)
+            except Exception:
+                break
+
+    def transcribe(self, mic_reader, on_partial=None, max_duration=12.5):
+        """Stream mic audio and return the final transcript. Blocks until done."""
+        if not self.ensure_connected():
+            return None
+
+        # Reset state for this turn
+        self._transcript_final = None
+        self._transcript_partial = None
+        self._done.clear()
+        self._on_partial = on_partial
+        self._audio_queue = __import__('queue').Queue()
+
+        # Signal turn start
+        self._turn_active.set()
+
+        # Stream mic audio from this thread
+        CHUNK = 1600  # 100ms at 16kHz
+        sent = 0
+        silence = 0
+        heard_speech = False
+
+        try:
+            for _ in range(int(max_duration * 10)):
+                if self._done.is_set():
+                    break
+
+                data, _ = mic_reader.read(CHUNK)
+                if data.dtype != np.int16:
+                    data = np.clip(data * 32768, -32768, 32767).astype(np.int16)
+
+                self._audio_queue.put(data.tobytes())
+                sent += 1
+
+                rms = np.sqrt(np.mean(data.astype(np.float64) ** 2))
+                if rms > 500:
+                    heard_speech = True
+                    silence = 0
+                elif heard_speech:
+                    silence += 1
+                    if silence >= 15:  # 1.5s silence
+                        break
+        finally:
+            self._audio_queue.put(None)  # end signal
+            self._turn_active.clear()
 
         # Wait for final transcript
-        try:
-            await asyncio.wait_for(transcript_event.wait(), timeout=5.0)
-        except asyncio.TimeoutError:
-            queue_message("GLADIA: Timeout waiting for transcript")
+        self._done.wait(timeout=5.0)
 
-        recv_task.cancel()
-        try:
-            await recv_task
-        except asyncio.CancelledError:
-            pass
+        result = self._transcript_final
+        if result:
+            queue_message(f"GLADIA: {result}")
 
-    finally:
-        try:
-            await ws.close()
-        except Exception:
-            pass
+        self._on_partial = None
+        return result
 
-    return final_transcript
+    def close(self):
+        """Shut down the session."""
+        self._running = False
+        self._turn_active.set()  # unblock any waiting
+        self._done.set()
+        if self._thread:
+            self._thread.join(timeout=5)
+
+
+# ── Module-level singleton ───────────────────────────────────────────
+
+_session = None
+
+
+def get_session():
+    global _session
+    if _session is None:
+        _session = GladiaSession()
+    return _session
+
+
+def transcribe_streaming(mic_reader, on_partial=None, max_duration=12.5):
+    """Main entry point called from module_stt.py."""
+    return get_session().transcribe(mic_reader, on_partial, max_duration)

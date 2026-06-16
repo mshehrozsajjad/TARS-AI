@@ -1091,11 +1091,13 @@ class STTManager:
         from modules.module_gladia import transcribe_streaming
         from modules.module_mic import ResamplingInputStream
 
+        _ui = getattr(self, 'ui_manager', None)
+        _user = CONFIG['CHAR'].get('user_name', 'User')
+
         def _on_partial(text):
             """Show partial transcript on UI as user speaks."""
-            user_name = CONFIG['CHAR'].get('user_name', 'User')
-            if hasattr(self, 'ui_manager') and self.ui_manager:
-                self.ui_manager.update_data(user_name, text, user_name)
+            if _ui:
+                _ui.update_data(_user, text, _user)
 
         with ResamplingInputStream(dtype="int16") as mic:
             mic.flush()

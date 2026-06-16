@@ -90,14 +90,6 @@ def wake_word_callback(wake_response):
     except Exception:
         pass
 
-    # Prepare Gladia session in background while greeting plays
-    if CONFIG.get("STT", {}).get("stt_processor") == "gladia":
-        try:
-            from modules.module_gladia import prepare_session
-            prepare_session()
-        except Exception:
-            pass
-
     # In Gemini Live mode, skip the wake response entirely — no text, no audio.
     conversation_mode = CONFIG.get("GEMINI_LIVE", {}).get("conversation_mode", "standard")
     if conversation_mode == "gemini_live":
