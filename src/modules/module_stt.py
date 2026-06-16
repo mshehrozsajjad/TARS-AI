@@ -743,7 +743,9 @@ class STTManager:
                 if self.sherpa_vad is not None:
                     self.sherpa_vad.reset()
                 # Check again if paused before transcribing
-                if not self.is_paused():
+                _paused = self.is_paused()
+                queue_message(f"DEBUG LOOP: Wake word handled, paused={_paused}, gemini_cb={'set' if self.gemini_live_callback else 'none'}")
+                if not _paused:
                     # In Gemini Live mode, skip local STT and route to Gemini callback
                     if self.gemini_live_callback is not None:
                         queue_message("DEBUG: Routing to Gemini Live mode")
