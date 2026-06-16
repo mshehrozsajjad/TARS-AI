@@ -104,7 +104,11 @@ def transcribe_streaming(stt_manager):
     detected_speech = False
     silent_frames = 0
     speech_frames = 0
-    max_silent = stt_manager.MAX_SILENT_FRAMES
+    # Give user more time to start speaking (2x the normal timeout)
+    # Normal speechdelay is for mid-speech pauses; pre-speech needs longer
+    # since user may still be processing the robot's reply
+    max_silent_pre_speech = stt_manager.MAX_SILENT_FRAMES * 2
+    max_silent_post_speech = stt_manager.MAX_SILENT_FRAMES
     min_speech_frames = 5
 
     with ResamplingInputStream(dtype="int16") as mic:
@@ -132,11 +136,12 @@ def transcribe_streaming(stt_manager):
             # Run local VAD
             is_silence, detected_speech, silent_frames = vad_func(data, detected_speech, silent_frames)
 
-            if not detected_speech and silent_frames >= max_silent:
+            if not detected_speech and silent_frames >= max_silent_pre_speech:
                 break  # No speech detected, give up
 
             if is_silence and detected_speech and speech_frames >= min_speech_frames:
-                break  # End of speech
+                if silent_frames >= max_silent_post_speech:
+                    break  # End of speech
 
             if detected_speech and not is_silence:
                 if speech_frames == 0:

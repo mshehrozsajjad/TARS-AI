@@ -26,6 +26,8 @@ SKILL = {
      * "side_side" - rock side to side
      * "happy_dance" - full happy dance routine
      * "neutral" - reset to standing position
+     * "wave_right" - wave with right hand
+     * "wave_left" - wave with left hand
    Do NOT infer or guess movement from suggestions or questions
    Parameters: {{"movements": ["forward", "laugh", "bow"]}}
    Example: {{"function": "execute_movement", "parameters": {{"movements": ["forward", "forward", "left"]}}}}""",
@@ -55,6 +57,7 @@ def _execute_movement(movements):
             pose, bow,
             tilt_right, tilt_left, side_side,
             happy_dance, neutral_legs,
+            wave_right, wave_left,
         )
     except ImportError:
         queue_message("[ERROR] Servo control module not available.")
@@ -75,6 +78,8 @@ def _execute_movement(movements):
         "side_side": side_side,
         "happy_dance": happy_dance,
         "neutral": neutral_legs,
+        "wave_right": wave_right,
+        "wave_left": wave_left,
     }
 
     def movement_task():
