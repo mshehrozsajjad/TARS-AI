@@ -3,11 +3,7 @@ Module: Gladia Streaming STT
 Real-time speech-to-text using Gladia's WebSocket API.
 
 Streams mic audio to Gladia in real-time and returns the final
-transcript when the user stops speaking. Gladia handles VAD
-(voice activity detection) internally.
-
-Sessions are pre-created during wake word detection so the WebSocket
-is ready to receive audio immediately when recording starts.
+transcript when the user stops speaking.
 
 Used as an STT processor option in module_stt.py.
 """
@@ -15,16 +11,13 @@ Used as an STT processor option in module_stt.py.
 import os
 import json
 import asyncio
-import threading
 import numpy as np
-import time
 
 from modules.module_config import load_config
 from modules.module_messageQue import queue_message
 
 CONFIG = load_config()
 
-# ── Lazy imports ─────────────────────────────────────────────────────
 _websockets = None
 
 
@@ -42,37 +35,32 @@ def _ensure_deps():
         )
 
 
-# ── Pre-warmed session cache ─────────────────────────────────────────
-# Session URL is fetched during wake word so it's ready when recording starts.
-_cached_ws_url = None
-_cached_session_id = None
-_cache_time = 0
-_cache_lock = threading.Lock()
-_SESSION_TTL = 60  # seconds before cached session expires
-
-
-def prewarm_session():
-    """Create a Gladia session in background. Call during wake word detection."""
-    threading.Thread(target=_do_prewarm, daemon=True).start()
-
-
-def _do_prewarm():
-    """Synchronous helper: create session and cache the WebSocket URL."""
-    global _cached_ws_url, _cached_session_id, _cache_time
+def transcribe_streaming(mic_reader, max_duration=12.5):
+    """Stream mic audio to Gladia and return the final transcript."""
     _ensure_deps()
 
     api_key = os.getenv("GLADIA_API_KEY", "")
     if not api_key:
-        return
+        queue_message("ERROR: GLADIA_API_KEY not set in .env")
+        return None
 
-    # Skip if we already have a fresh session
-    with _cache_lock:
-        if _cached_ws_url and (time.time() - _cache_time) < _SESSION_TTL:
-            return
-
+    loop = asyncio.new_event_loop()
     try:
-        import requests
-        resp = requests.post(
+        return loop.run_until_complete(
+            _stream_and_transcribe(api_key, mic_reader, max_duration)
+        )
+    except Exception as e:
+        queue_message(f"ERROR: Gladia transcription failed: {e}")
+        return None
+    finally:
+        loop.close()
+
+
+async def _create_session(api_key):
+    """Create a Gladia live session. Returns (ws_url, session_id) or (None, None)."""
+    import aiohttp
+    async with aiohttp.ClientSession() as http:
+        async with http.post(
             "https://api.gladia.io/v2/live",
             headers={
                 "Content-Type": "application/json",
@@ -84,135 +72,40 @@ def _do_prewarm():
                 "sample_rate": 16000,
                 "bit_depth": 16,
                 "channels": 1,
-                "language_config": {
-                    "languages": ["en"],
-                    "code_switching": False,
-                },
+                "language_config": {"languages": ["en"], "code_switching": False},
                 "messages_config": {
                     "receive_partial_transcripts": False,
                     "receive_final_transcripts": True,
                 },
             },
-            timeout=5,
-        )
-        if resp.status_code in (200, 201):
-            data = resp.json()
-            with _cache_lock:
-                _cached_ws_url = data.get("url")
-                _cached_session_id = data.get("id")
-                _cache_time = time.time()
-            queue_message(f"GLADIA: Pre-warmed session {_cached_session_id}")
-        else:
-            queue_message(f"GLADIA: Pre-warm failed ({resp.status_code})")
-    except Exception as e:
-        queue_message(f"GLADIA: Pre-warm error: {e}")
-
-
-def _pop_cached_session():
-    """Return and clear the cached session URL, or None if expired/missing."""
-    global _cached_ws_url, _cached_session_id, _cache_time
-    with _cache_lock:
-        if _cached_ws_url and (time.time() - _cache_time) < _SESSION_TTL:
-            url = _cached_ws_url
-            sid = _cached_session_id
-            _cached_ws_url = None
-            _cached_session_id = None
-            return url, sid
-        return None, None
-
-
-# ── Main transcription function ──────────────────────────────────────
-
-def transcribe_streaming(mic_reader, silence_threshold=None, max_duration=12.5):
-    """Stream mic audio to Gladia and return the final transcript.
-
-    Args:
-        mic_reader:         A ResamplingInputStream context (already entered).
-        silence_threshold:  RMS threshold below which audio is considered silence.
-        max_duration:       Max recording duration in seconds.
-
-    Returns:
-        str: Final transcript text, or None if nothing was said.
-    """
-    _ensure_deps()
-
-    api_key = os.getenv("GLADIA_API_KEY", "")
-    if not api_key:
-        queue_message("ERROR: GLADIA_API_KEY not set in .env")
-        return None
-
-    loop = asyncio.new_event_loop()
-    try:
-        result = loop.run_until_complete(
-            _stream_and_transcribe(api_key, mic_reader, max_duration)
-        )
-        return result
-    except Exception as e:
-        queue_message(f"ERROR: Gladia transcription failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-    finally:
-        loop.close()
+        ) as resp:
+            if resp.status not in (200, 201):
+                error = await resp.text()
+                queue_message(f"ERROR: Gladia session failed ({resp.status}): {error}")
+                return None, None
+            data = await resp.json()
+            return data.get("url"), data.get("id")
 
 
 async def _stream_and_transcribe(api_key, mic_reader, max_duration):
-    """Core async function: connect to Gladia, stream audio, get transcript."""
+    """Create session, connect WebSocket, stream audio, return transcript."""
 
-    # Try pre-warmed session first
-    ws_url, session_id = _pop_cached_session()
-
-    # Fall back to creating a new session
+    ws_url, session_id = await _create_session(api_key)
     if not ws_url:
-        import aiohttp
-        async with aiohttp.ClientSession() as http:
-            async with http.post(
-                "https://api.gladia.io/v2/live",
-                headers={
-                    "Content-Type": "application/json",
-                    "x-gladia-key": api_key,
-                },
-                json={
-                    "model": "solaria-1",
-                    "encoding": "wav/pcm",
-                    "sample_rate": 16000,
-                    "bit_depth": 16,
-                    "channels": 1,
-                    "language_config": {
-                        "languages": ["en"],
-                        "code_switching": False,
-                    },
-                    "messages_config": {
-                        "receive_partial_transcripts": False,
-                        "receive_final_transcripts": True,
-                    },
-                },
-            ) as resp:
-                if resp.status not in (200, 201):
-                    error = await resp.text()
-                    queue_message(f"ERROR: Gladia session creation failed ({resp.status}): {error}")
-                    return None
-                data = await resp.json()
-                ws_url = data.get("url")
-                session_id = data.get("id")
-                if not ws_url:
-                    queue_message("ERROR: Gladia returned no WebSocket URL")
-                    return None
-                queue_message(f"GLADIA: Session {session_id} created")
-    else:
-        queue_message(f"GLADIA: Using pre-warmed session {session_id}")
+        return None
+    queue_message(f"GLADIA: Session {session_id} created")
 
-    # Connect WebSocket and stream audio
     final_transcript = None
     transcript_event = asyncio.Event()
 
     try:
         ws = await _websockets.connect(ws_url)
     except Exception as e:
-        queue_message(f"GLADIA: WebSocket connect failed (session may have expired): {e}")
+        queue_message(f"GLADIA: WebSocket connect failed: {e}")
         return None
 
     try:
+        # Background receiver for transcripts
         async def _receive():
             nonlocal final_transcript
             try:
@@ -226,16 +119,10 @@ async def _stream_and_transcribe(api_key, mic_reader, max_duration):
                             final_transcript = text
                             queue_message(f"GLADIA: Final transcript: {text}")
                             transcript_event.set()
-
-                    elif msg_type == "post_final_transcript":
-                        transcript_event.set()
-
                     elif msg_type == "error":
                         queue_message(f"GLADIA: Error: {msg}")
                         transcript_event.set()
-
-            except Exception as e:
-                queue_message(f"GLADIA: Receive error: {e}")
+            except Exception:
                 transcript_event.set()
 
         recv_task = asyncio.create_task(_receive())
@@ -247,7 +134,7 @@ async def _stream_and_transcribe(api_key, mic_reader, max_duration):
         chunks_sent = 0
         silence_count = 0
         speech_detected = False
-        MAX_SILENCE_CHUNKS = 15  # 1.5s of silence after speech = done
+        MAX_SILENCE_CHUNKS = 15  # 1.5s silence after speech = done
 
         for _ in range(max_chunks):
             if transcript_event.is_set():
@@ -260,12 +147,14 @@ async def _stream_and_transcribe(api_key, mic_reader, max_duration):
                 return data
 
             chunk = await loop.run_in_executor(None, _read)
-            pcm_bytes = chunk.tobytes()
 
-            await ws.send(pcm_bytes)
-            chunks_sent += 1
+            try:
+                await ws.send(chunk.tobytes())
+                chunks_sent += 1
+            except Exception:
+                break  # connection dropped
 
-            # Simple silence detection
+            # Silence detection
             rms = np.sqrt(np.mean(chunk.astype(np.float64) ** 2))
             if rms > 500:
                 speech_detected = True
@@ -285,7 +174,7 @@ async def _stream_and_transcribe(api_key, mic_reader, max_duration):
         try:
             await asyncio.wait_for(transcript_event.wait(), timeout=5.0)
         except asyncio.TimeoutError:
-            queue_message("GLADIA: Timeout waiting for final transcript")
+            queue_message("GLADIA: Timeout waiting for transcript")
 
         recv_task.cancel()
         try:
@@ -299,5 +188,5 @@ async def _stream_and_transcribe(api_key, mic_reader, max_duration):
         except Exception:
             pass
 
-    queue_message(f"GLADIA: Sent {chunks_sent} audio chunks")
+    queue_message(f"GLADIA: Sent {chunks_sent} chunks")
     return final_transcript
