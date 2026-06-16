@@ -178,36 +178,9 @@ class GeminiLiveSession:
         tool_results = []
         output_device = _get_output_device()
 
-        # Audio playback queue — chunks are resampled and queued here,
-        # a background thread plays them via sd.play() (avoids blocking async loop)
-        import queue
-        _play_queue = queue.Queue()
-        _play_done = threading.Event()
-
-        def _playback_worker():
-            """Background thread: plays audio chunks via sd.play()."""
-            while not _play_done.is_set():
-                try:
-                    chunk = _play_queue.get(timeout=0.2)
-                except queue.Empty:
-                    continue
-                if chunk is None:  # poison pill
-                    break
-                try:
-                    audio_float = chunk / 32768.0
-                    max_val = np.max(np.abs(audio_float))
-                    if max_val > 0:
-                        audio_float = audio_float / max_val
-                    sd.play(audio_float.astype(np.float32),
-                            self.PLAYBACK_RATE, device=output_device)
-                    sd.wait()
-                except Exception as e:
-                    queue_message(f"GEMINI_LIVE: Playback error: {e}")
-
-        playback_thread = threading.Thread(target=_playback_worker, daemon=True)
-        playback_thread.start()
-
-        _audio_buffer = []  # accumulate resampled samples
+        _audio_buffer = []       # accumulate resampled samples
+        _is_playing = False      # track if we've switched to playback mode
+        _output_stream = None    # sd.OutputStream for smooth streaming
 
         # Start mic audio sender in background
         audio_send_task = asyncio.create_task(self._stream_audio(stop_event))
@@ -226,20 +199,33 @@ class GeminiLiveSession:
                             if hasattr(part, 'inline_data') and part.inline_data is not None:
                                 pcm_data = part.inline_data.data
                                 if pcm_data:
-                                    # Resample 24kHz → 16kHz
+                                    # First audio chunk: stop mic, open output stream
+                                    if not _is_playing:
+                                        _is_playing = True
+                                        # Stop mic so USB device is free for output
+                                        audio_send_task.cancel()
+                                        try:
+                                            await audio_send_task
+                                        except asyncio.CancelledError:
+                                            pass
+                                        # Open continuous output stream
+                                        _output_stream = sd.OutputStream(
+                                            samplerate=self.PLAYBACK_RATE,
+                                            channels=1,
+                                            dtype='int16',
+                                            blocksize=4096,
+                                            device=output_device,
+                                        )
+                                        _output_stream.start()
+
+                                    # Resample 24kHz → 16kHz and write to stream
                                     samples = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float64)
                                     ratio = self.PLAYBACK_RATE / self.GEMINI_SAMPLE_RATE
                                     new_len = int(len(samples) * ratio)
                                     indices = np.linspace(0, len(samples) - 1, new_len)
                                     resampled = np.interp(indices, np.arange(len(samples)), samples)
-                                    _audio_buffer.append(resampled)
-
-                                    # Flush to playback thread every ~200ms
-                                    total = sum(len(c) for c in _audio_buffer)
-                                    if total >= 3200:
-                                        merged = np.concatenate(_audio_buffer)
-                                        _audio_buffer.clear()
-                                        _play_queue.put(merged)
+                                    resampled = np.clip(resampled, -32768, 32767).astype(np.int16)
+                                    _output_stream.write(resampled.reshape(-1, 1))
 
                     # User speech transcription
                     if hasattr(sc, 'input_transcription') and sc.input_transcription:
@@ -276,23 +262,21 @@ class GeminiLiveSession:
         except Exception as e:
             queue_message(f"GEMINI_LIVE: Error during turn: {e}")
         finally:
-            # Stop mic streaming
-            audio_send_task.cancel()
-            try:
-                await audio_send_task
-            except asyncio.CancelledError:
-                pass
+            # Stop mic streaming if still running
+            if not audio_send_task.cancelled():
+                audio_send_task.cancel()
+                try:
+                    await audio_send_task
+                except asyncio.CancelledError:
+                    pass
 
-            # Flush remaining audio buffer
-            if _audio_buffer:
-                merged = np.concatenate(_audio_buffer)
-                _play_queue.put(merged)
-                _audio_buffer.clear()
-
-            # Signal playback thread to finish and wait
-            _play_queue.put(None)
-            _play_done.set()
-            playback_thread.join(timeout=10)
+            # Close output stream
+            if _output_stream is not None:
+                try:
+                    _output_stream.stop()
+                    _output_stream.close()
+                except Exception:
+                    pass
 
         input_text = ' '.join(input_transcript_parts)
         output_text = ' '.join(output_transcript_parts)
