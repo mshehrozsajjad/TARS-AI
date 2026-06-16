@@ -241,13 +241,13 @@ def _prepare_request_data(llm_backend, prompt, image_b64=None):
         user_content = prompt
 
     if llm_backend == "openai":
-        url = f"{CONFIG['LLM']['base_url']}/v1/chat/completions"
+        url = "https://api.openai.com/v1/chat/completions"
         model = CONFIG['LLM']['openai_model']
     elif llm_backend == "grok":
-        url = f"{CONFIG['LLM']['base_url']}/v1/chat/completions"
+        url = "https://api.x.ai/v1/chat/completions"
         model = CONFIG['LLM']['grok_model']
     elif llm_backend == "deepinfra":
-        url = f"{CONFIG['LLM']['base_url']}/v1/openai/chat/completions"
+        url = "https://api.deepinfra.com/v1/openai/chat/completions"
         model = CONFIG['LLM']['openai_model']
     elif llm_backend == "gemini":
         url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
