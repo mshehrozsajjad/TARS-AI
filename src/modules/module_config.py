@@ -211,7 +211,12 @@ def apply_device_overrides(config_dict: dict, capabilities: DeviceCapabilities) 
         config_dict["UI"]["UI_enabled"] = False
     
     if not capabilities.can_use_vision and config_dict["VISION"]["enabled"]:
-        config_dict["VISION"]["enabled"] = False
+        # Allow cloud-based vision processors even on low-RAM devices
+        cloud_processors = ("openai", "llm", "server_hosted")
+        if config_dict["VISION"].get("vision_processor") not in cloud_processors:
+            config_dict["VISION"]["enabled"] = False
+            if show_warnings:
+                queue_message(f"WARNING: Local vision disabled for {capabilities.profile.value} — use openai/llm/server_hosted for cloud vision")
     
     if not capabilities.can_use_emotion and config_dict["EMOTION"]["enabled"]:
         if show_warnings:
