@@ -1108,15 +1108,12 @@ class STTManager:
         if chunks is None:
             return None
 
-        # Combine and amplify (same as OpenAI path)
+        # Combine and amplify
         audio_data = np.concatenate([self.amplify_audio(c) for c in chunks])
 
-        # Reject near-silent recordings
-        rms = np.sqrt(np.mean(audio_data.astype(np.float64) ** 2))
-        if rms < self.silence_threshold:
-            return None
-
+        print(f"[DEBUG] Sending {len(audio_data)} samples ({speech_frames} speech frames) to Gladia...", flush=True)
         transcript = transcribe_audio(audio_data, sample_rate=RATE)
+        print(f"[DEBUG] Gladia returned: {transcript!r}", flush=True)
         if not transcript:
             return None
         return self._emit_result(transcript)
