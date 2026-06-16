@@ -99,7 +99,7 @@ async def _stream_and_transcribe(api_key, mic_reader, max_duration):
                 },
             },
         ) as resp:
-            if resp.status != 200:
+            if resp.status not in (200, 201):
                 error = await resp.text()
                 queue_message(f"ERROR: Gladia session creation failed ({resp.status}): {error}")
                 return None
