@@ -91,7 +91,9 @@ async def _send_and_transcribe(api_key, websockets_mod, audio_data, sample_rate)
     final_transcript = None
     done = asyncio.Event()
 
+    queue_message(f"GLADIA: Connecting to session...")
     ws = await websockets_mod.connect(ws_url)
+    queue_message(f"GLADIA: Connected, sending {len(audio_data)} samples ({len(audio_data)/sample_rate:.1f}s)")
     try:
         # Receiver
         async def _recv():
@@ -148,4 +150,8 @@ async def _send_and_transcribe(api_key, websockets_mod, audio_data, sample_rate)
         except Exception:
             pass
 
+    if final_transcript:
+        queue_message(f"GLADIA: Transcript: {final_transcript}")
+    else:
+        queue_message("GLADIA: No transcript received")
     return final_transcript

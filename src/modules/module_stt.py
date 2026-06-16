@@ -616,6 +616,7 @@ class STTManager:
                 if not detected_speech and silent_frames >= max_silent:
                     _, clear_bar = self._get_progress_bar()
                     clear_bar()
+                    queue_message(f"DEBUG REC: No speech detected after {silent_frames} frames, giving up")
                     return None, 0
 
                 # Post-speech: VAD signaled end of turn
@@ -637,6 +638,8 @@ class STTManager:
                         if len(pre_roll_buffer) > pre_roll_frames:
                             pre_roll_buffer.pop(0)
                 else:
+                    if speech_frames == 0:
+                        queue_message(f"DEBUG REC: Speech detected (vad={vad_method})")
                     if speech_frames == 0 and pre_roll_buffer:
                         pre_roll_added = len(pre_roll_buffer)
                         audio_chunks.extend(pre_roll_buffer)
