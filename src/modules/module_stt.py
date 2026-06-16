@@ -760,6 +760,7 @@ class STTManager:
                 "external": self._transcribe_with_server,
                 "openai": self._transcribe_with_openai,
                 "sherpa-onnx": self._transcribe_with_sherpa_onnx,
+                "gladia": self._transcribe_with_gladia,
             }
             processor = self.config["STT"].get("stt_processor", "fastrtc")
             transcribe_fn = processors.get(processor)
@@ -1084,6 +1085,19 @@ class STTManager:
             transcription = translation.choices[0].message.content
 
         return self._emit_result(transcription)
+
+    def _transcribe_with_gladia(self):
+        """Stream mic audio to Gladia for real-time transcription."""
+        from modules.module_gladia import transcribe_streaming
+        from modules.module_mic import ResamplingInputStream
+
+        with ResamplingInputStream(dtype="int16") as mic:
+            mic.flush()
+            transcript = transcribe_streaming(mic, max_duration=12.5)
+
+        if not transcript:
+            return None
+        return self._emit_result(transcript)
 
     def _sherpa_transcribe_audio(self, audio_chunks, sample_rate=16000):
         """Denoise + transcribe int16 audio chunks with sherpa-onnx. Returns transcript string or None."""

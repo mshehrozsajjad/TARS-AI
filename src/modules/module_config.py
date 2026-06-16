@@ -58,7 +58,7 @@ class DeviceCapabilities:
 DEVICE_PROFILES: Dict[DeviceProfile, DeviceCapabilities] = {
     DeviceProfile.PI5: DeviceCapabilities(
         profile=DeviceProfile.PI5,
-        allowed_stt={"fastrtc", "silero", "openai", "external", "sherpa-onnx"},
+        allowed_stt={"fastrtc", "silero", "openai", "external", "sherpa-onnx", "gladia"},
         allowed_tts={"espeak", "piper", "silero", "elevenlabs", "openai", "other", "external"},
         allowed_vad={"silero", "rms", "sherpa-onnx", "smart-turn"},
         allowed_wake={"fastrtc", "atomik", "sherpa-onnx"},
@@ -76,7 +76,7 @@ DEVICE_PROFILES: Dict[DeviceProfile, DeviceCapabilities] = {
     ),
     DeviceProfile.PI4: DeviceCapabilities(
         profile=DeviceProfile.PI4,
-        allowed_stt={"openai", "external", "sherpa-onnx"},
+        allowed_stt={"openai", "external", "sherpa-onnx", "gladia"},
         allowed_tts={"espeak", "piper", "elevenlabs", "openai", "other", "external"},
         allowed_vad={"silero", "rms", "sherpa-onnx", "smart-turn"},
         allowed_wake={"atomik", "sherpa-onnx"},
@@ -94,7 +94,7 @@ DEVICE_PROFILES: Dict[DeviceProfile, DeviceCapabilities] = {
     ),
     DeviceProfile.PI3: DeviceCapabilities(
         profile=DeviceProfile.PI3,
-        allowed_stt={"openai", "external"},
+        allowed_stt={"openai", "external", "gladia"},
         allowed_tts={"espeak", "elevenlabs", "openai", "other", "external"},
         allowed_vad={"rms", "sherpa-onnx"},
         allowed_wake={"atomik", "sherpa-onnx"},
@@ -112,7 +112,7 @@ DEVICE_PROFILES: Dict[DeviceProfile, DeviceCapabilities] = {
     ),
     DeviceProfile.PIZERO2: DeviceCapabilities(
         profile=DeviceProfile.PIZERO2,
-        allowed_stt={"openai"},
+        allowed_stt={"openai", "gladia"},
         allowed_tts={"elevenlabs", "openai", "other", "external"},
         allowed_vad={"rms"},
         allowed_wake={"atomik"},
