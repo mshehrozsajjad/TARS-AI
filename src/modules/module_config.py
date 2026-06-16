@@ -379,7 +379,14 @@ def load_config():
         queue_message("ERROR: [PERSONA] section missing in persona.ini.")
         sys.exit(1)
 
-    raspberry_version = detect_raspberry_pi_version()
+    # Allow manual override of device profile via config.ini [DEVICE] section.
+    # Useful when hardware is Pi4 but dependencies were installed for Pi3 profile.
+    forced_profile = config.get('DEVICE', 'profile', fallback='').strip().lower()
+    if forced_profile:
+        raspberry_version = forced_profile
+        queue_message(f"LOAD: Using forced device profile: {forced_profile}")
+    else:
+        raspberry_version = detect_raspberry_pi_version()
 
     device_profile = get_device_profile(raspberry_version)
     capabilities = DEVICE_PROFILES[device_profile]

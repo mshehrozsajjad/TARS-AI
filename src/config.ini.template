@@ -54,6 +54,12 @@ json_mode = True
 # Token counting encoding — only change if token errors occur (cl100k_base works for most models)
 override_encoding_model = cl100k_base
 
+[DEVICE]
+# Force a device profile instead of auto-detecting from hardware.
+# Useful when running Pi3 dependencies on Pi4 hardware (1GB RAM).
+# Leave empty for auto-detection. Options: pi5 | pi4 | pi3 | pizero2
+profile =
+
 [GEMINI_LIVE]
 # Conversation mode: standard (STT→LLM→TTS) | gemini_live (audio→Gemini Live API→TTS)
 # standard = existing pipeline with separate STT, LLM, and TTS steps
