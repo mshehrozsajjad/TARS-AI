@@ -67,8 +67,8 @@ class GeminiLiveSession:
     is played directly through the speaker.  No separate TTS needed.
     """
 
-    # Gemini outputs 24kHz PCM audio
-    OUTPUT_SAMPLE_RATE = 24000
+    GEMINI_SAMPLE_RATE = 24000  # Gemini outputs 24kHz PCM
+    PLAYBACK_RATE = 16000       # Resample to 16kHz for USB audio devices
 
     def __init__(self):
         _ensure_sdk()
@@ -178,10 +178,10 @@ class GeminiLiveSession:
         tool_results = []
         audio_chunks = []
 
-        # Open audio output stream for direct playback
+        # Open audio output stream at 16kHz (supported by USB audio devices)
         output_device = _get_output_device()
         audio_stream = sd.OutputStream(
-            samplerate=self.OUTPUT_SAMPLE_RATE,
+            samplerate=self.PLAYBACK_RATE,
             channels=1,
             dtype='int16',
             blocksize=4096,
@@ -207,9 +207,15 @@ class GeminiLiveSession:
                             if hasattr(part, 'inline_data') and part.inline_data is not None:
                                 pcm_data = part.inline_data.data
                                 if pcm_data:
-                                    # Convert bytes to int16 numpy array and play
-                                    samples = np.frombuffer(pcm_data, dtype=np.int16)
-                                    audio_stream.write(samples.reshape(-1, 1))
+                                    # Convert 24kHz PCM to int16 numpy array
+                                    samples = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float64)
+                                    # Resample from 24kHz to 16kHz via linear interpolation
+                                    ratio = self.PLAYBACK_RATE / self.GEMINI_SAMPLE_RATE
+                                    new_len = int(len(samples) * ratio)
+                                    indices = np.linspace(0, len(samples) - 1, new_len)
+                                    resampled = np.interp(indices, np.arange(len(samples)), samples)
+                                    resampled = np.clip(resampled, -32768, 32767).astype(np.int16)
+                                    audio_stream.write(resampled.reshape(-1, 1))
                                     audio_chunks.append(pcm_data)
                                     if on_audio_chunk:
                                         try:
