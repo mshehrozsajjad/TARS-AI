@@ -136,6 +136,8 @@ def utterance_callback(message):
             return
 
         user_text = message_dict['text'].strip()
+        _user_display = CONFIG['CHAR'].get('user_name', 'User')
+        queue_message(f"[{_user_display}] {user_text}")
 
         # Kick off memory embedding in background so it's ready by prompt-build time
         if memory_manager and memory_manager.long_mem_use and hasattr(memory_manager, 'prefetch_embedding'):
@@ -228,8 +230,12 @@ def utterance_callback(message):
                 return
 
             # Stream to OpenGL UI (update last message in-place)
-            if ui_manager and hasattr(ui_manager, 'update_streaming_data'):
-                ui_manager.update_streaming_data(clean_total)
+            if ui_manager:
+                if hasattr(ui_manager, 'update_streaming_data'):
+                    ui_manager.update_streaming_data(clean_total)
+                else:
+                    character_name = CONFIG['CHAR']['character_name']
+                    ui_manager.update_data(character_name, clean_total, character_name)
 
             # Stream new text to web UI (only if user is on webui)
             if _is_webui:
@@ -321,6 +327,14 @@ def utterance_callback(message):
         except Exception:
             pass
 
+        # Log reply and function calls to terminal
+        character_name = CONFIG['CHAR']['character_name']
+        queue_message(f"[{character_name}] {reply}")
+        if isinstance(parsed, dict):
+            fc = parsed.get("function_calls", [])
+            if fc:
+                queue_message(f"TOOLS: {fc}")
+
         # Detect emotion (parallel-safe — runs while TTS thread plays sentences)
         speed.start('emotion')
         emotion = None
@@ -360,8 +374,12 @@ def utterance_callback(message):
             pass
 
         # Finalize the streaming message with the complete reply
-        if ui_manager and hasattr(ui_manager, 'update_streaming_data'):
-            ui_manager.update_streaming_data(reply)
+        if ui_manager:
+            if hasattr(ui_manager, 'update_streaming_data'):
+                ui_manager.update_streaming_data(reply)
+            else:
+                character_name = CONFIG['CHAR']['character_name']
+                ui_manager.update_data(character_name, reply, character_name)
 
         # Handle side effects (vision/search/photo run inline, others in background)
         _followup_reply = None
@@ -427,8 +445,12 @@ def utterance_callback(message):
             followup_clean = re.sub(r'[^a-zA-Z0-9\s.,?!;:"\'-<>]', '', _followup_reply)
             # Update OpenGL UI with follow-up content
             set_tars_state(TarsState.TALKING)
-            if ui_manager and hasattr(ui_manager, 'update_streaming_data'):
-                ui_manager.update_streaming_data(_followup_reply)
+            if ui_manager:
+                if hasattr(ui_manager, 'update_streaming_data'):
+                    ui_manager.update_streaming_data(_followup_reply)
+                else:
+                    character_name = CONFIG['CHAR']['character_name']
+                    ui_manager.update_data(character_name, _followup_reply, character_name)
             if stt_manager:
                 stt_manager.start_bargein_monitor(tts_text=followup_clean)
             speed.start('followup_tts')
@@ -586,8 +608,11 @@ def gemini_live_callback():
                 _has_started_talking[0] = True
                 set_tars_state(TarsState.TALKING)
                 speed.mark_first_token()
-            if ui_manager and hasattr(ui_manager, 'update_streaming_data'):
-                ui_manager.update_streaming_data(text)
+            if ui_manager:
+                if hasattr(ui_manager, 'update_streaming_data'):
+                    ui_manager.update_streaming_data(text)
+                else:
+                    ui_manager.update_data(character_name, text, character_name)
             if _is_webui:
                 try:
                     from modules.module_chatui import stream_reply_token
@@ -610,8 +635,11 @@ def gemini_live_callback():
         output_text = result.get('output_transcript', '')
 
         # Finalize UI
-        if ui_manager and output_text and hasattr(ui_manager, 'update_streaming_data'):
-            ui_manager.update_streaming_data(output_text)
+        if ui_manager and output_text:
+            if hasattr(ui_manager, 'update_streaming_data'):
+                ui_manager.update_streaming_data(output_text)
+            else:
+                ui_manager.update_data(character_name, output_text, character_name)
 
         set_tars_state(TarsState.LISTENING)
 
