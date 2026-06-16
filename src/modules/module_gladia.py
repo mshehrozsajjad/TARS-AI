@@ -1,9 +1,10 @@
 """
 Module: Gladia STT
-Speech-to-text using the official Gladia SDK.
+Real-time speech-to-text using the official Gladia SDK.
 
-Uses the sync SDK client which manages HTTP session creation
-and WebSocket connection internally.
+Streams mic audio to Gladia in real-time while using sherpa-onnx VAD
+locally for end-of-speech detection. Audio is sent to Gladia as the
+user speaks, so the transcript is ready almost instantly after speech ends.
 
 Used as an STT processor option in module_stt.py.
 """
@@ -15,15 +16,14 @@ import numpy as np
 from modules.module_messageQue import queue_message
 
 
-def transcribe_audio(audio_data, sample_rate=16000):
-    """Send recorded audio to Gladia and return the transcript.
+def transcribe_streaming(stt_manager):
+    """Stream mic audio to Gladia while using local VAD for end-of-speech.
 
     Args:
-        audio_data: numpy int16 array of recorded audio.
-        sample_rate: sample rate (default 16000).
+        stt_manager: The STTManager instance (for VAD, mic, thresholds).
 
     Returns:
-        str: Transcript text, or None.
+        str: Final transcript text, or None.
     """
     api_key = os.getenv("GLADIA_API_KEY", "")
     if not api_key:
@@ -38,12 +38,16 @@ def transcribe_audio(audio_data, sample_rate=16000):
             LiveV2MessagesConfig,
             LiveV2WebSocketMessage,
             LiveV2EndedMessage,
-            LiveV2InitResponse,
         )
     except ImportError:
         print("[GLADIA] ERROR: pip install gladiaio-sdk", flush=True)
         return None
 
+    from modules.module_mic import ResamplingInputStream
+    from modules.module_tts import is_tts_playing, needs_mic_flush, clear_mic_flush
+    from modules.module_state import set_tars_state, TarsState
+
+    # Start Gladia session
     client = GladiaClient(api_key=api_key)
     live = client.live()
 
@@ -54,7 +58,7 @@ def transcribe_audio(audio_data, sample_rate=16000):
         LiveV2InitRequest(
             model="solaria-1",
             encoding="wav/pcm",
-            sample_rate=sample_rate,
+            sample_rate=16000,
             bit_depth=16,
             channels=1,
             language_config=LiveV2LanguageConfig(languages=["en"]),
@@ -82,15 +86,72 @@ def transcribe_audio(audio_data, sample_rate=16000):
     def on_ended(msg: LiveV2EndedMessage):
         done.set()
 
-    # Send audio in chunks
-    pcm_bytes = audio_data.tobytes()
-    chunk_size = 3200  # 100ms at 16kHz (1600 samples * 2 bytes)
-    for i in range(0, len(pcm_bytes), chunk_size):
-        session.send_audio(pcm_bytes[i:i + chunk_size])
+    # Get VAD function from STT manager
+    vad_dispatch = {
+        "silero": stt_manager._is_silence_detected_silero,
+        "sherpa-onnx": stt_manager._is_silence_detected_sherpa_onnx,
+        "smart-turn": stt_manager._is_silence_detected_smart_turn
+            if stt_manager.smart_turn_session is not None
+            else stt_manager._is_silence_detected_rms,
+    }
+    vad_func = vad_dispatch.get(stt_manager.vadmethod, stt_manager._is_silence_detected_rms)
 
+    # Reset VAD state
+    if stt_manager.sherpa_vad is not None:
+        stt_manager.sherpa_vad.reset()
+    stt_manager.smart_turn_audio_buffer.clear()
+
+    detected_speech = False
+    silent_frames = 0
+    speech_frames = 0
+    max_silent = stt_manager.MAX_SILENT_FRAMES
+    min_speech_frames = 5
+
+    with ResamplingInputStream(dtype="int16") as mic:
+        # Flush stale mic audio from TTS
+        try:
+            if needs_mic_flush():
+                mic.flush()
+                clear_mic_flush()
+        except Exception:
+            pass
+
+        for _ in range(stt_manager.MAX_RECORDING_FRAMES):
+            data, _ = mic.read(4000)
+
+            # Abort if TTS started
+            if is_tts_playing():
+                set_tars_state(TarsState.STANDBY)
+                session.stop_recording()
+                done.wait(timeout=2)
+                return None
+
+            # Send audio to Gladia in real-time
+            session.send_audio(stt_manager.amplify_audio(data).tobytes())
+
+            # Run local VAD
+            is_silence, detected_speech, silent_frames = vad_func(data, detected_speech, silent_frames)
+
+            if not detected_speech and silent_frames >= max_silent:
+                break  # No speech detected, give up
+
+            if is_silence and detected_speech and speech_frames >= min_speech_frames:
+                break  # End of speech
+
+            if detected_speech and not is_silence:
+                if speech_frames == 0:
+                    print("[GLADIA] Speech detected, streaming...", flush=True)
+                speech_frames += 1
+
+    # Signal end of audio
     session.stop_recording()
 
-    # Wait for final transcript
+    if speech_frames < min_speech_frames:
+        done.wait(timeout=2)
+        return None
+
+    # Wait for final transcript — should arrive very quickly since
+    # Gladia already received all audio in real-time
     done.wait(timeout=10.0)
 
     if final_transcript:

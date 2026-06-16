@@ -1099,20 +1099,11 @@ class STTManager:
         return self._emit_result(transcription)
 
     def _transcribe_with_gladia(self):
-        """Record audio with existing VAD, then send to Gladia for transcription."""
-        from modules.module_gladia import transcribe_audio
+        """Stream mic audio to Gladia in real-time with local VAD."""
+        from modules.module_gladia import transcribe_streaming
 
-        print(f"[DEBUG] Gladia: starting recording, vad={self.vadmethod}", flush=True)
-        RATE = 16000
-        chunks, speech_frames = self._record_audio_chunks()
-        if chunks is None:
-            return None
-
-        # Combine and amplify
-        audio_data = np.concatenate([self.amplify_audio(c) for c in chunks])
-
-        print(f"[DEBUG] Sending {len(audio_data)} samples ({speech_frames} speech frames) to Gladia...", flush=True)
-        transcript = transcribe_audio(audio_data, sample_rate=RATE)
+        print(f"[DEBUG] Gladia: starting stream, vad={self.vadmethod}", flush=True)
+        transcript = transcribe_streaming(self)
         print(f"[DEBUG] Gladia returned: {transcript!r}", flush=True)
         if not transcript:
             return None
