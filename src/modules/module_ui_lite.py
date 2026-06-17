@@ -93,7 +93,17 @@ class UIManagerLite(threading.Thread):
         pass
 
     def set_tars_status(self, status):
-        pass
+        if status in ("STANDBY", "BOOTING"):
+            new = ""
+        elif status == "THINKING":
+            new = "THINKING"
+        elif status == "LISTENING":
+            new = "LISTENING"
+        else:
+            return
+        if self._state != new:
+            self._state = new
+            self._dirty.set()
 
     def think(self):
         if self._state != "THINKING":
