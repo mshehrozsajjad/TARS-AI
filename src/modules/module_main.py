@@ -382,6 +382,7 @@ def utterance_callback(message):
 
         # Handle side effects (vision/search/photo run inline, others in background)
         _followup_reply = None
+        _side_effects_thread = None
         tools_dur = 0
         if not isinstance(parsed, str):
             func_calls = parsed.get("function_calls", [])
@@ -410,10 +411,11 @@ def utterance_callback(message):
                     queue_message(f"DEBUG VOICE: No reply change after side effects")
             elif func_calls or new_mems:
                 queue_message(f"DEBUG VOICE: Running side effects in background thread")
-                threading.Thread(
+                _side_effects_thread = threading.Thread(
                     target=llm_execute_side_effects,
                     args=(parsed, user_text), daemon=True
-                ).start()
+                )
+                _side_effects_thread.start()
             else:
                 queue_message(f"DEBUG VOICE: No side effects to run")
         else:
@@ -458,6 +460,11 @@ def utterance_callback(message):
             if stt_manager:
                 stt_manager.stop_bargein_monitor()
             reply = _followup_reply  # Update for web UI display
+
+        # Wait for background tool execution to finish before starting next recording
+        if _side_effects_thread is not None:
+            queue_message("DEBUG VOICE: Waiting for background tool execution to finish...")
+            _side_effects_thread.join(timeout=30)
 
         # After response finishes, return to LISTENING (waiting for next utterance in session)
         # Bot only goes to STANDBY after timeout in STT manager

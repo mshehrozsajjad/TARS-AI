@@ -107,5 +107,7 @@ def execute(parameters, context):
 
     movements = parameters.get("movements", [])
     if movements:
-        _execute_movement(movements)
+        thread = _execute_movement(movements)
+        if thread is not None:
+            thread.join(timeout=30)
     return None
