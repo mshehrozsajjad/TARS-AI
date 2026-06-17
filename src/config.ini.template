@@ -171,6 +171,9 @@ emotion_method = llm
 # HuggingFace model for emotion analysis (only used when emotion_method = classifier)
 # Use the ONNX variant for faster CPU inference: SamLowe/roberta-base-go_emotions-onnx
 emotion_model = SamLowe/roberta-base-go_emotions-onnx
+# Mood half-life in seconds — how long emotional state lingers (7200 = 2 hours)
+# Higher = mood persists longer across conversations. Lower = mood fades quickly.
+mood_half_life = 7200
 
 [VISION]
 # Enable camera vision (~1GB RAM when active)

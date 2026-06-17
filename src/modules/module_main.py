@@ -189,6 +189,7 @@ def utterance_callback(message):
         # ── Sentence-pipeline TTS ─────────────────────────────────────────────
         _acc_raw    = ['']   # cumulative raw text from LLM (may include <think>)
         _clean_seen = ['']   # total clean text processed so far (for delta tracking)
+        _pending_gesture = [None]  # gesture name from LLM response, fired on first TTS play
 
         def _apply_sanitize(text):
             text = _sanitize_for_tts(text)
@@ -199,6 +200,14 @@ def utterance_callback(message):
             set_tars_state(TarsState.TALKING)
             if stt_manager:
                 stt_manager.start_bargein_monitor(tts_text="")
+            # Fire gesture in parallel with speech start
+            if _pending_gesture[0]:
+                try:
+                    from modules.module_gestures import execute_gesture_async
+                    execute_gesture_async(_pending_gesture[0])
+                except Exception as e:
+                    queue_message(f"WARNING: Gesture failed: {e}")
+                _pending_gesture[0] = None
 
         pipeline = SentenceTTSPipeline(
             CONFIG['TTS']['ttsoption'],
@@ -334,6 +343,20 @@ def utterance_callback(message):
             if fc:
                 queue_message(f"TOOLS: {fc}")
 
+        # Extract gesture from LLM response — fire during TTS playback
+        if isinstance(parsed, dict):
+            gesture_name = parsed.get("gesture")
+            if gesture_name:
+                queue_message(f"GESTURE: {gesture_name}")
+                # If TTS hasn't started yet, queue for _on_first_play
+                # If TTS already started, fire immediately
+                if _pending_gesture[0] is None:
+                    try:
+                        from modules.module_gestures import execute_gesture_async
+                        execute_gesture_async(gesture_name)
+                    except Exception as e:
+                        queue_message(f"WARNING: Gesture failed: {e}")
+
         # Detect emotion (parallel-safe — runs while TTS thread plays sentences)
         speed.start('emotion')
         emotion = None
@@ -427,6 +450,13 @@ def utterance_callback(message):
             set_tars_state(TarsState.TALKING)
             if stt_manager:
                 stt_manager.start_bargein_monitor(tts_text=reply_clean)
+            # Fire gesture at speech start for preemptive path
+            if isinstance(parsed, dict) and parsed.get("gesture"):
+                try:
+                    from modules.module_gestures import execute_gesture_async
+                    execute_gesture_async(parsed["gesture"])
+                except Exception:
+                    pass
             speed.start('tts')
             was_interrupted = asyncio.run(play_audio_chunks(reply_clean, CONFIG['TTS']['ttsoption'], emotion=emotion))
             pipeline._duration = speed.stop('tts')

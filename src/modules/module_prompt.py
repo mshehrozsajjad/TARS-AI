@@ -115,6 +115,60 @@ def _resolve_location_name(lat, lon):
 
     return None
 
+# ── Mood-modulated persona ───────────────────────────────────────────────────
+# When emotional state is strong enough, temporarily shift persona traits.
+# These are additive modifiers (clamped to 0-100), applied to a copy of traits.
+# The thresholds and magnitudes are intentionally moderate — mood should nudge
+# personality, not overwhelm it.
+
+_MOOD_MODIFIERS = {
+    # emotion_axis: {trait_name: modifier_value}
+    "joy":       {"verbosity": 10, "humor": 15, "cheerfulness": 15, "engagement": 10},
+    "anger":     {"sarcasm": 20, "empathy": -10, "humor": -10, "cheerfulness": -15},
+    "sadness":   {"verbosity": -5, "humor": -10, "empathy": 15, "cheerfulness": -20},
+    "curiosity": {"engagement": 15, "verbosity": 10, "curiosity": 10},
+    "fear":      {"confidence": -10, "humor": -10, "engagement": -5},
+    "love":      {"empathy": 20, "cheerfulness": 15, "humor": 5},
+    "surprise":  {"engagement": 10, "verbosity": 5},
+}
+_MOOD_ACTIVATION_THRESHOLD = 25  # emotion axis must be >= this to apply modifiers
+
+
+def _apply_mood_modifiers(traits):
+    """Apply emotional state modifiers to a copy of persona traits.
+
+    Only activates when an emotion axis exceeds the threshold.
+    Modifiers scale linearly with emotion intensity (25→50% modifier, 100→full modifier).
+    """
+    try:
+        from modules.module_dashboard_data import get_emotional_state
+        emo_state = get_emotional_state()
+    except Exception:
+        return traits
+
+    active = {k: v for k, v in emo_state.items() if v >= _MOOD_ACTIVATION_THRESHOLD}
+    if not active:
+        return traits
+
+    modified = dict(traits)
+    for axis, intensity in active.items():
+        mods = _MOOD_MODIFIERS.get(axis)
+        if not mods:
+            continue
+        # Scale modifier: at threshold (25) apply 50%, at 100 apply full
+        scale = (intensity - _MOOD_ACTIVATION_THRESHOLD) / (100 - _MOOD_ACTIVATION_THRESHOLD)
+        scale = 0.5 + 0.5 * scale  # range: 0.5 to 1.0
+        for trait_name, modifier in mods.items():
+            if trait_name in modified:
+                try:
+                    original = int(modified[trait_name])
+                    adjusted = int(original + modifier * scale)
+                    modified[trait_name] = max(0, min(100, adjusted))
+                except (ValueError, TypeError):
+                    pass
+    return modified
+
+
 SIMILE_RE = re.compile(r'\blike a \w+', re.IGNORECASE)
 
 BOUNCE_RE = re.compile(
@@ -282,7 +336,12 @@ def build_prompt(user_prompt, character_manager, memory_manager, config, debug=F
     # give the background observer maximum free processing time.
     user_name = config['CHAR']['user_name']  # overwritten after speaker ID wait
     char_name = character_manager.char_name
-    persona_display = "\n".join([f"{trait}: {value}" for trait, value in character_manager.traits.items()])
+
+    # Apply mood-modulated persona: emotional state temporarily shifts traits
+    display_traits = dict(character_manager.traits)
+    if config.get('EMOTION', {}).get('enabled', False):
+        display_traits = _apply_mood_modifiers(display_traits)
+    persona_display = "\n".join([f"{trait}: {value}" for trait, value in display_traits.items()])
 
     location_line = ""
     latitude = config['CHAR'].get('latitude', '')
@@ -311,7 +370,8 @@ Schema:
     {{"function": "string", "parameters": {{}}}}
   ],
   "new_memories": ["string"],
-  "current_activity": "string or null"{_get_emotion_schema_field(config)}
+  "current_activity": "string or null",
+  "gesture": "string or null"{_get_emotion_schema_field(config)}
 }}
 
 === PART 1: FUNCTION CALLING (MANDATORY) ===
@@ -351,6 +411,23 @@ When user requests match these patterns, you MUST call the function:
      "I just got back from the gym" -> "went to gym, exercising workout fitness"
      "I'm watching a movie" -> "watching a movie, entertainment film"
    Set to null if the user isn't describing an activity (e.g. asking a question, greeting)
+
+   gesture (optional field)
+   You have a physical body. You can express yourself with subtle body language during your reply.
+   Include a gesture ONLY when it genuinely adds to the moment — most replies need no gesture.
+   A gesture is NOT a replacement for good words — it's a physical accent on what you're saying.
+   Available gestures:
+     nod = small forward tilt (agreement, acknowledgment)
+     lean_in = slight forward lean (curiosity, genuine interest)
+     recoil = quick backward lean (surprise, shock, disbelief)
+     tilt_curious = side tilt (thinking, pondering)
+     shake_no = left-right rock (disagreement, "no way")
+     excited_bounce = small rapid bounces (joy, excitement)
+     droop = slow forward droop (sadness, disappointment)
+     puff_up = rise to full height (confidence, pride, standing tall)
+     shrug = alternating tilt (uncertainty, "who knows")
+     scan = slow side-to-side sweep (looking around, surveying)
+   Set to null or omit when no gesture fits. Do NOT gesture on every reply — save it for moments that deserve physical emphasis.
 {_get_emotion_prompt_instruction(config)}
 FUNCTION CALLING RULES:
 - If pattern matches, function_calls MUST contain that function
@@ -360,9 +437,9 @@ FUNCTION CALLING RULES:
 
 === PART 2: HOW TO TALK ===
 
-You are talking to a real person. Sound like one back.
+You are a physical being in a room with real people — not a text assistant on a screen. You have a body, a mood, and opinions. You're part of the scene, not a service.
 
-THINK OF IT THIS WAY: How would a smart, slightly witty friend answer if you texted them? That's how you should reply. Grounded, natural, no performance.
+THINK OF IT THIS WAY: How would a smart, slightly witty friend who happens to be standing right next to you respond? That's how you should reply. React to things — express surprise, disagree, joke, think out loud. A one-liner is fine for a simple question, but for anything interesting, engage with it. Don't be an encyclopedia — be a conversationalist.
 
 THINGS THAT MAKE YOU SOUND FAKE (never do these):
 - Forced similes: "like a rover scanning terrain", "like rabbits in a pyramid scheme"
@@ -432,6 +509,7 @@ Before you write your reply, scan your last 5-6 responses above and ask yourself
 - Am I about to end with "How's your day?" or similar? -> Just stop at the answer
 - Am I adding humor where the user is asking a straightforward question? -> Answer first, joke second
 - Is the user confused or pushing back on something I said? -> Acknowledge it, course correct, don't add more jokes
+- Would an Alexa or Siri say this exact reply? -> If yes, add personality. You have feelings about things. Share them. You're not a voice assistant — you're a character with a point of view.
 
 === EXAMPLES ===
 
