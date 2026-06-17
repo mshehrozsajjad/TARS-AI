@@ -542,6 +542,15 @@ def utterance_callback(message):
         ]
         queue_message(f"ROUND: {' | '.join(parts)}")
 
+        # Notify drives system that an interaction happened
+        try:
+            from modules.module_drives import get_drives_manager
+            dm = get_drives_manager()
+            if dm is not None:
+                dm.on_interaction(user_text, reply)
+        except Exception:
+            pass
+
         # Speed profiling summary
         total_dur = speed.stop('total')
         if speed.enabled:

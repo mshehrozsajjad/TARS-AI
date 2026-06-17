@@ -148,24 +148,41 @@ def _apply_mood_modifiers(traits):
 
     active = {k: v for k, v in emo_state.items() if v >= _MOOD_ACTIVATION_THRESHOLD}
     if not active:
-        return traits
+        modified = dict(traits)
+    else:
+        modified = dict(traits)
+        for axis, intensity in active.items():
+            mods = _MOOD_MODIFIERS.get(axis)
+            if not mods:
+                continue
+            # Scale modifier: at threshold (25) apply 50%, at 100 apply full
+            scale = (intensity - _MOOD_ACTIVATION_THRESHOLD) / (100 - _MOOD_ACTIVATION_THRESHOLD)
+            scale = 0.5 + 0.5 * scale  # range: 0.5 to 1.0
+            for trait_name, modifier in mods.items():
+                if trait_name in modified:
+                    try:
+                        original = int(modified[trait_name])
+                        adjusted = int(original + modifier * scale)
+                        modified[trait_name] = max(0, min(100, adjusted))
+                    except (ValueError, TypeError):
+                        pass
 
-    modified = dict(traits)
-    for axis, intensity in active.items():
-        mods = _MOOD_MODIFIERS.get(axis)
-        if not mods:
-            continue
-        # Scale modifier: at threshold (25) apply 50%, at 100 apply full
-        scale = (intensity - _MOOD_ACTIVATION_THRESHOLD) / (100 - _MOOD_ACTIVATION_THRESHOLD)
-        scale = 0.5 + 0.5 * scale  # range: 0.5 to 1.0
-        for trait_name, modifier in mods.items():
-            if trait_name in modified:
-                try:
-                    original = int(modified[trait_name])
-                    adjusted = int(original + modifier * scale)
-                    modified[trait_name] = max(0, min(100, adjusted))
-                except (ValueError, TypeError):
-                    pass
+    # Layer drive-based modifiers on top of mood modifiers
+    try:
+        from modules.module_drives import get_drives_manager
+        dm = get_drives_manager()
+        if dm is not None:
+            drive_mods = dm.get_drive_modifiers()
+            for trait_name, modifier in drive_mods.items():
+                if trait_name in modified:
+                    try:
+                        original = int(modified[trait_name])
+                        modified[trait_name] = max(0, min(100, original + modifier))
+                    except (ValueError, TypeError):
+                        pass
+    except Exception:
+        pass
+
     return modified
 
 
@@ -708,6 +725,17 @@ Current Time: {now.strftime('%H:%M:%S')}
                 dominant = max(active, key=active.get)
                 parts = [f"{k}: {v}%" for k, v in sorted(active.items(), key=lambda x: -x[1])]
                 base_prompt += f"\n[EMOTIONAL STATE] Your current emotional state based on recent interactions: {', '.join(parts)}. Dominant mood: {dominant}. Let this subtly influence your tone — don't mention these numbers or that you have an emotional state system."
+    except Exception:
+        pass
+
+    # Internal drives context (curiosity, social need, energy, boredom)
+    try:
+        from modules.module_drives import get_drives_manager
+        dm = get_drives_manager()
+        if dm is not None:
+            drives_ctx = dm.get_drives_context()
+            if drives_ctx:
+                base_prompt += f"\n{drives_ctx}"
     except Exception:
         pass
 

@@ -324,6 +324,17 @@ rightHandMin = 300
 rightHandMax = 420
 rightHandOffset = 0
 
+[DRIVES]
+# Enable internal drives system (curiosity, social need, energy, boredom)
+enabled = False
+# How often drives tick in seconds (60 = once per minute)
+tick_interval = 60
+# Allow TARS to speak unprompted when drives are high
+proactive_speech = True
+# Quiet hours — no proactive speech during this window (24h format)
+quiet_start = 23
+quiet_end = 7
+
 [SKILL:discord]
 disabled = true
 

@@ -408,6 +408,17 @@ if __name__ == "__main__":
     # === Servo Initialization ===
     startup_initialization()
 
+    # === Drives System (internal mood/needs) ===
+    drives_manager = None
+    if CONFIG.get('DRIVES', {}).get('enabled', 'false').lower() == 'true':
+        try:
+            from modules.module_drives import DrivesManager
+            drives_manager = DrivesManager(config=CONFIG, battery_module=battery)
+            drives_manager.start()
+            queue_message("LOAD: Drives system started")
+        except Exception as e:
+            queue_message(f"WARNING: Drives system not available: {e}")
+
     # === Main Loop ===
     try:
         queue_message(f"LOAD: TARS-AI OS: {VERSION} running on {RASPBERRY_VERSION.upper()}")
@@ -437,6 +448,9 @@ if __name__ == "__main__":
         except Exception:
             pass
         stt_manager.stop()
+        # Stop drives system
+        if drives_manager is not None:
+            drives_manager.stop()
         # Stop speaker ID if running
         try:
             from modules.module_speaker_id import get_speaker_id_manager
