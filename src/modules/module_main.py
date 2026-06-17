@@ -432,15 +432,15 @@ def utterance_callback(message):
                     queue_message(f"DEBUG VOICE: Follow-up reply detected: {_followup_reply[:80]}...")
                 else:
                     queue_message(f"DEBUG VOICE: No reply change after side effects")
-            elif func_calls or new_mems:
+            else:
+                # Always run side effects — write_longterm_memory saves
+                # the conversation even when there are no function calls
                 queue_message(f"DEBUG VOICE: Running side effects in background thread")
                 _side_effects_thread = threading.Thread(
                     target=llm_execute_side_effects,
                     args=(parsed, user_text), daemon=True
                 )
                 _side_effects_thread.start()
-            else:
-                queue_message(f"DEBUG VOICE: No side effects to run")
         else:
             queue_message(f"DEBUG VOICE: parsed is str (legacy), no side effects")
 
