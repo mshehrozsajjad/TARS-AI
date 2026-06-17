@@ -202,8 +202,12 @@ def apply_device_overrides(config_dict: dict, capabilities: DeviceCapabilities) 
             queue_message(f"WARNING: Wake word '{wake_processor}' not supported on {capabilities.profile.value}, using '{capabilities.fallback_wake}'")
         config_dict["STT"]["wake_word_processor"] = capabilities.fallback_wake
     
-    if config_dict["LLM"]["contextsize"] > capabilities.max_context_size:
-        config_dict["LLM"]["contextsize"] = capabilities.max_context_size
+    # Only cap context size for local/on-device LLM backends where Pi RAM matters.
+    # Cloud backends (openai, grok, deepinfra, gemini) process context server-side.
+    _cloud_backends = {"openai", "grok", "deepinfra", "gemini"}
+    if config_dict["LLM"]["llm_backend"] not in _cloud_backends:
+        if config_dict["LLM"]["contextsize"] > capabilities.max_context_size:
+            config_dict["LLM"]["contextsize"] = capabilities.max_context_size
     
     if not capabilities.can_use_ui and config_dict["UI"]["UI_enabled"]:
         if show_warnings:
