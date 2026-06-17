@@ -219,9 +219,15 @@ def apply_device_overrides(config_dict: dict, capabilities: DeviceCapabilities) 
                 queue_message(f"WARNING: Local vision disabled for {capabilities.profile.value} — use openai/llm/server_hosted for cloud vision")
     
     if not capabilities.can_use_emotion and config_dict["EMOTION"]["enabled"]:
-        if show_warnings:
-            queue_message(f"WARNING: Emotion disabled for {capabilities.profile.value}")
-        config_dict["EMOTION"]["enabled"] = False
+        # LLM emotion method has zero resource cost — it reads the emotion field
+        # the LLM already returns, so allow it even on constrained devices.
+        if config_dict["EMOTION"].get("emotion_method") == "llm":
+            if show_warnings:
+                queue_message(f"INFO: Emotion using LLM method on {capabilities.profile.value} (no local model needed)")
+        else:
+            if show_warnings:
+                queue_message(f"WARNING: Emotion classifier disabled for {capabilities.profile.value} — set emotion_method=llm to use LLM-based emotion")
+            config_dict["EMOTION"]["enabled"] = False
     
     config_dict["_device"] = {
         "raspberry_version": capabilities.profile.value,
