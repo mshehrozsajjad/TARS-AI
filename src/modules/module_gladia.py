@@ -2,33 +2,38 @@
 Module: Gladia STT
 Real-time speech-to-text using the official Gladia SDK.
 
-Streams mic audio to Gladia in real-time while using sherpa-onnx VAD
-locally for end-of-speech detection. Audio is sent to Gladia as the
-user speaks, so the transcript is ready almost instantly after speech ends.
+Maintains a persistent WebSocket session across utterances within a
+conversation to eliminate per-utterance connection overhead (~300-800ms).
+Session is created on first use after wake word and kept alive through
+follow-up utterances. Torn down when the conversation ends (sleep).
 
-Used as an STT processor option in module_stt.py.
+Local VAD is still used for:
+- No-speech timeout (return to sleep if nobody speaks)
+- End-of-speech detection (stop reading mic after silence)
+
+After end-of-speech, Gladia's server-side processing delivers the final
+transcript almost instantly since audio was streamed in real-time.
 """
 
 import os
+import queue
 import threading
-import numpy as np
+import time
 
 from modules.module_messageQue import queue_message
 
 
-def transcribe_streaming(stt_manager):
-    """Stream mic audio to Gladia while using local VAD for end-of-speech.
+# === Persistent Session State ===
+_client = None
+_session = None
+_transcript_queue = None
+_session_alive = False
+_session_lock = threading.Lock()
 
-    Args:
-        stt_manager: The STTManager instance (for VAD, mic, thresholds).
 
-    Returns:
-        str: Final transcript text, or None.
-    """
-    api_key = os.getenv("GLADIA_API_KEY", "")
-    if not api_key:
-        print("[GLADIA] ERROR: GLADIA_API_KEY not set", flush=True)
-        return None
+def _create_session():
+    """Create a new Gladia live session. Returns True on success."""
+    global _client, _session, _transcript_queue, _session_alive
 
     try:
         from gladiaio_sdk import (
@@ -41,50 +46,128 @@ def transcribe_streaming(stt_manager):
         )
     except ImportError:
         print("[GLADIA] ERROR: pip install gladiaio-sdk", flush=True)
-        return None
+        return False
+
+    api_key = os.getenv("GLADIA_API_KEY", "")
+    if not api_key:
+        print("[GLADIA] ERROR: GLADIA_API_KEY not set", flush=True)
+        return False
+
+    # Reuse client instance across sessions
+    if _client is None:
+        _client = GladiaClient(api_key=api_key)
+
+    live = _client.live()
+    _transcript_queue = queue.Queue()
+
+    t0 = time.perf_counter()
+    try:
+        _session = live.start_session(
+            LiveV2InitRequest(
+                model="solaria-1",
+                encoding="wav/pcm",
+                sample_rate=16000,
+                bit_depth=16,
+                channels=1,
+                language_config=LiveV2LanguageConfig(languages=["en"]),
+                messages_config=LiveV2MessagesConfig(
+                    receive_partial_transcripts=False,
+                ),
+            )
+        )
+    except Exception as e:
+        print(f"[GLADIA] Failed to create session: {e}", flush=True)
+        return False
+
+    elapsed = time.perf_counter() - t0
+    print(f"[GLADIA] Session created in {elapsed:.2f}s", flush=True)
+    _session_alive = True
+
+    @_session.on("message")
+    def on_message(msg: LiveV2WebSocketMessage):
+        if msg.type == "transcript" and msg.data.is_final:
+            text = msg.data.utterance.text.strip()
+            if text:
+                _transcript_queue.put(text)
+
+    @_session.on("error")
+    def on_error(err: Exception):
+        global _session_alive
+        print(f"[GLADIA] Session error: {err}", flush=True)
+        _session_alive = False
+        try:
+            _transcript_queue.put(None)
+        except Exception:
+            pass
+
+    @_session.once("ended")
+    def on_ended(msg: LiveV2EndedMessage):
+        global _session_alive
+        print("[GLADIA] Session ended by server", flush=True)
+        _session_alive = False
+        try:
+            _transcript_queue.put(None)
+        except Exception:
+            pass
+
+    return True
+
+
+def _ensure_session():
+    """Ensure a Gladia session is alive, creating one if needed.
+    Must be called inside _session_lock."""
+    global _session, _session_alive
+
+    if _session is not None and _session_alive:
+        # Drain stale transcripts from previous utterance
+        while _transcript_queue is not None:
+            try:
+                _transcript_queue.get_nowait()
+            except queue.Empty:
+                break
+        return True
+
+    # Session is dead or doesn't exist
+    _session = None
+    _session_alive = False
+    return _create_session()
+
+
+def stop_session():
+    """Tear down the persistent Gladia session.
+    Called when conversation ends (going to sleep) or on shutdown."""
+    global _session, _session_alive
+    with _session_lock:
+        if _session is not None:
+            if _session_alive:
+                try:
+                    _session.stop_recording()
+                except Exception as e:
+                    print(f"[GLADIA] Error stopping session: {e}", flush=True)
+            _session_alive = False
+            _session = None
+            print("[GLADIA] Session stopped", flush=True)
+
+
+def transcribe_streaming(stt_manager):
+    """Stream mic audio to persistent Gladia session with local VAD.
+
+    Reuses the Gladia WebSocket across utterances within a conversation.
+    Creates a new session on first call or if the previous one died.
+
+    Args:
+        stt_manager: The STTManager instance (for VAD, mic, config).
+
+    Returns:
+        str: Final transcript text, or None.
+    """
+    with _session_lock:
+        if not _ensure_session():
+            return None
 
     from modules.module_mic import ResamplingInputStream
     from modules.module_tts import is_tts_playing, needs_mic_flush, clear_mic_flush
     from modules.module_state import set_tars_state, TarsState
-
-    # Start Gladia session
-    client = GladiaClient(api_key=api_key)
-    live = client.live()
-
-    final_transcript = None
-    done = threading.Event()
-
-    session = live.start_session(
-        LiveV2InitRequest(
-            model="solaria-1",
-            encoding="wav/pcm",
-            sample_rate=16000,
-            bit_depth=16,
-            channels=1,
-            language_config=LiveV2LanguageConfig(languages=["en"]),
-            messages_config=LiveV2MessagesConfig(
-                receive_partial_transcripts=False,
-            ),
-        )
-    )
-
-    @session.on("message")
-    def on_message(msg: LiveV2WebSocketMessage):
-        nonlocal final_transcript
-        if msg.type == "transcript" and msg.data.is_final:
-            text = msg.data.utterance.text.strip()
-            if text:
-                final_transcript = text
-                done.set()
-
-    @session.on("error")
-    def on_error(err: Exception):
-        print(f"[GLADIA] Error: {err}", flush=True)
-        done.set()
-
-    @session.once("ended")
-    def on_ended(msg: LiveV2EndedMessage):
-        done.set()
 
     # Get VAD function from STT manager
     vad_dispatch = {
@@ -108,6 +191,8 @@ def transcribe_streaming(stt_manager):
     max_silent_post_speech = stt_manager.MAX_SILENT_FRAMES
     min_speech_frames = 5
 
+    print(f"[DEBUG] Gladia: streaming audio (persistent session), vad={stt_manager.vadmethod}", flush=True)
+
     with ResamplingInputStream(dtype="int16") as mic:
         # Flush stale mic audio from TTS
         try:
@@ -120,15 +205,19 @@ def transcribe_streaming(stt_manager):
         for _ in range(stt_manager.MAX_RECORDING_FRAMES):
             data, _ = mic.read(4000)
 
-            # Abort if TTS started
+            # Abort if TTS started (barge-in or error)
             if is_tts_playing():
                 set_tars_state(TarsState.STANDBY)
-                session.stop_recording()
-                done.wait(timeout=2)
-                return None
+                return None  # Session stays alive for next utterance
 
-            # Send audio to Gladia in real-time
-            session.send_audio(stt_manager.amplify_audio(data).tobytes())
+            # Send audio to persistent Gladia session
+            if _session_alive and _session is not None:
+                try:
+                    _session.send_audio(stt_manager.amplify_audio(data).tobytes())
+                except Exception as e:
+                    print(f"[GLADIA] send_audio failed: {e}", flush=True)
+                    stop_session()
+                    break
 
             # Run local VAD
             is_silence, detected_speech, silent_frames = vad_func(data, detected_speech, silent_frames)
@@ -145,18 +234,23 @@ def transcribe_streaming(stt_manager):
                     print("[GLADIA] Speech detected, streaming...", flush=True)
                 speech_frames += 1
 
-    # Signal end of audio
-    session.stop_recording()
-
     if speech_frames < min_speech_frames:
-        done.wait(timeout=2)
         return None
 
-    # Wait for final transcript — should arrive very quickly since
-    # Gladia already received all audio in real-time
-    done.wait(timeout=10.0)
+    # Wait for Gladia's final transcript.
+    # Audio including trailing silence was already streamed in real-time,
+    # so the transcript should arrive very quickly.
+    try:
+        transcript = _transcript_queue.get(timeout=5.0)
+    except queue.Empty:
+        print("[GLADIA] Timeout waiting for transcript after speech", flush=True)
+        # Session might be stuck — tear down for recreation on next call
+        stop_session()
+        return None
 
-    if final_transcript:
-        print(f"[GLADIA] {final_transcript}", flush=True)
+    if transcript is None:
+        # Session error or ended unexpectedly during wait
+        return None
 
-    return final_transcript
+    print(f"[GLADIA] {transcript}", flush=True)
+    return transcript

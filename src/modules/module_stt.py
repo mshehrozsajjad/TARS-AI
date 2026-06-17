@@ -754,6 +754,20 @@ class STTManager:
                         self.gemini_live_callback()
                     else:
                         self._transcribe_utterance()
+                        # Conversation chain ended — tear down Gladia persistent session
+                        if self.config["STT"].get("stt_processor") == "gladia":
+                            try:
+                                from modules.module_gladia import stop_session
+                                stop_session()
+                            except Exception:
+                                pass
+        # Shutdown — clean up Gladia session
+        if self.config["STT"].get("stt_processor") == "gladia":
+            try:
+                from modules.module_gladia import stop_session
+                stop_session()
+            except Exception:
+                pass
         queue_message("INFO: STT Manager stopped.")
 
     # === Transcription Dispatch ===
@@ -1102,10 +1116,9 @@ class STTManager:
         return self._emit_result(transcription)
 
     def _transcribe_with_gladia(self):
-        """Stream mic audio to Gladia in real-time with local VAD."""
+        """Stream mic audio to Gladia using persistent session with local VAD."""
         from modules.module_gladia import transcribe_streaming
 
-        print(f"[DEBUG] Gladia: starting stream, vad={self.vadmethod}", flush=True)
         transcript = transcribe_streaming(self)
         print(f"[DEBUG] Gladia returned: {transcript!r}", flush=True)
         if not transcript:
