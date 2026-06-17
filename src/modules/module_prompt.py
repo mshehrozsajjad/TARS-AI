@@ -434,16 +434,19 @@ When user requests match these patterns, you MUST call the function:
    Include a gesture ONLY when it genuinely adds to the moment — most replies need no gesture.
    A gesture is NOT a replacement for good words — it's a physical accent on what you're saying.
    Available gestures:
-     nod = small forward tilt (agreement, acknowledgment)
-     lean_in = slight forward lean (curiosity, genuine interest)
-     recoil = quick backward lean (surprise, shock, disbelief)
+     nod = bow forward (agreement, acknowledgment)
+     lean_in = tilt to one side (curiosity, leaning in with interest)
+     recoil = tilt away (surprise, shock, disbelief)
      tilt_curious = side tilt (thinking, pondering)
-     shake_no = left-right rock (disagreement, "no way")
-     excited_bounce = small rapid bounces (joy, excitement)
-     droop = slow forward droop (sadness, disappointment)
-     puff_up = rise to full height (confidence, pride, standing tall)
-     shrug = alternating tilt (uncertainty, "who knows")
-     scan = slow side-to-side sweep (looking around, surveying)
+     shake_no = rock side to side (disagreement, "no way")
+     excited_bounce = rapid bouncing (joy, excitement)
+     laugh = bouncing laughter (amusement, finding something funny)
+     droop = restless leg swing (sadness, restless disappointment)
+     puff_up = strike a pose (confidence, pride, standing tall)
+     shrug = side to side rock (uncertainty, "who knows")
+     wave = wave greeting (saying hello/goodbye)
+     celebrate = excited bouncing (big celebration, great news)
+     bow = respectful bow (gratitude, thank you, showing respect)
    Set to null or omit when no gesture fits. Do NOT gesture on every reply — save it for moments that deserve physical emphasis.
 {_get_emotion_prompt_instruction(config)}
 FUNCTION CALLING RULES:
