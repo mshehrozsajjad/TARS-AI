@@ -792,11 +792,14 @@ class STTManager:
                 speed.log(f"stt:{processor}({speed.fmt(stt_dur)})")
                 speed.start('stt_to_llm')  # Measure gap from STT done to LLM start
 
+            print(f"[DEBUG] transcribe result={'yes' if result else 'no'}, post_cb={'set' if self.post_utterance_callback else 'none'}", flush=True)
             if self.post_utterance_callback and result:
                 self.post_utterance_callback()
             return result
         except Exception as e:
-            queue_message(f"ERROR: Transcription failed: {e}")
+            print(f"[ERROR] Transcription failed: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
             return None
 
     # === Wake Word Gates ===

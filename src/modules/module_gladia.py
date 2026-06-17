@@ -104,10 +104,7 @@ def transcribe_streaming(stt_manager):
     detected_speech = False
     silent_frames = 0
     speech_frames = 0
-    # Give user more time to start speaking (2x the normal timeout)
-    # Normal speechdelay is for mid-speech pauses; pre-speech needs longer
-    # since user may still be processing the robot's reply
-    max_silent_pre_speech = stt_manager.MAX_SILENT_FRAMES * 2
+    max_silent_pre_speech = stt_manager.MAX_SILENT_FRAMES
     max_silent_post_speech = stt_manager.MAX_SILENT_FRAMES
     min_speech_frames = 5
 
