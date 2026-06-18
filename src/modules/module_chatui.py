@@ -1030,22 +1030,30 @@ def train_face():
     while len(embeddings) < num_samples and frames_tried < max_attempts:
         frames_tried += 1
         try:
-            # Get frame from the camera feed (same path as /camera_feed that works)
-            import pygame as _pg
-            frame = camera.get_frame()
-            if frame is None:
+            # Get frame via capture_bytes (same JPEG path as /camera_feed)
+            jpeg_bytes = camera.capture_bytes()
+            if jpeg_bytes is None:
                 time.sleep(0.3)
                 continue
-            frame_array = _pg.surfarray.array3d(frame)
-            frame_array = np.transpose(frame_array, (1, 0, 2))
-            frame_array = np.ascontiguousarray(frame_array)
-            frame_bgr = cv2.cvtColor(frame_array, cv2.COLOR_RGB2BGR)
+            jpg_array = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+            frame_bgr = cv2.imdecode(jpg_array, cv2.IMREAD_COLOR)
+            if frame_bgr is None:
+                time.sleep(0.3)
+                continue
+
+            # Debug: save first frame so we can check what YuNet sees
+            if frames_tried == 1:
+                debug_path = os.path.join(BASE_DIR, '..', 'vision', 'debug_face_train.jpg')
+                cv2.imwrite(debug_path, frame_bgr)
+                queue_message(f"FACE TRAIN: Debug frame saved ({frame_bgr.shape[1]}x{frame_bgr.shape[0]})")
 
             h, w = frame_bgr.shape[:2]
             detector.setInputSize((w, h))
             _, faces = detector.detect(frame_bgr)
 
             if faces is None or len(faces) == 0:
+                if frames_tried <= 3:
+                    queue_message(f"FACE TRAIN: No face in frame {frames_tried} ({w}x{h})")
                 time.sleep(0.2)
                 continue
 
