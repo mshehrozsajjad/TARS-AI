@@ -986,7 +986,8 @@ def train_face():
 
     try:
         import cv2
-        from modules.module_awareness import HeadlessFaceRecognizer, _FACES_DIR, _DB_FILE
+        import numpy as np
+        from modules.module_awareness import _ensure_models, _MODELS_DIR, _FACES_DIR, _DB_FILE
     except ImportError as e:
         return jsonify({"error": f"Missing dependency: {e}"}), 500
 
@@ -1008,7 +1009,6 @@ def train_face():
         return jsonify({"error": f"Camera not available: {e}"}), 503
 
     # Create face detector/recognizer directly (avoid HeadlessFaceRecognizer overhead)
-    from modules.module_awareness import _ensure_models, _MODELS_DIR, _FACES_DIR, _DB_FILE
     _ensure_models()
     yunet_path = str(_MODELS_DIR / "face_detection_yunet_2023mar.onnx")
     sface_path = str(_MODELS_DIR / "face_recognition_sface_2021dec.onnx")
@@ -1028,7 +1028,6 @@ def train_face():
     max_attempts = num_samples * 3
 
     import pygame as _pg
-    import numpy as np
 
     while len(embeddings) < num_samples and frames_tried < max_attempts:
         frames_tried += 1
