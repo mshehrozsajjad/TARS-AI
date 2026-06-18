@@ -560,6 +560,7 @@ def load_config():
             "webui_theme": config.get('ACCESS', 'webui_theme', fallback='default'),
             "remote_access_enabled": config.getboolean('ACCESS', 'remote_access_enabled', fallback=False),
             "tunnel_name": config.get('ACCESS', 'tunnel_name', fallback=''),
+            "tunnel_hostname": config.get('ACCESS', 'tunnel_hostname', fallback=''),
         },
         "UI": {
             "UI_enabled": config.getboolean('UI', 'UI_enabled'),

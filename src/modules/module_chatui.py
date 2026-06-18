@@ -2175,39 +2175,11 @@ def _start_named_tunnel(bin_path, port, tunnel_name):
     """Start a named Cloudflare tunnel (static URL)."""
     global _tunnel_process, _tunnel_url
 
-    # Resolve the static URL by querying the tunnel's DNS config
-    url = None
-    try:
-        r = _sp.run(
-            [bin_path, 'tunnel', 'info', tunnel_name],
-            capture_output=True, text=True, timeout=10
-        )
-        # Look for the CNAME hostname in the output
-        for line in (r.stdout + r.stderr).splitlines():
-            # Match lines like: "| <uuid>.cfargotunnel.com | CNAME | tars.myclosr.site |"
-            # or "Connector ... hostname=tars.myclosr.site"
-            hostname_match = re.search(r'([a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\s*\|?\s*$', line)
-            if hostname_match:
-                candidate = hostname_match.group(1)
-                # Skip the cfargotunnel.com internal hostname
-                if 'cfargotunnel.com' not in candidate:
-                    url = f'https://{candidate}'
-                    break
-    except Exception:
-        pass
-
-    # Fallback: try reading from tunnel route DNS
-    if not url:
-        try:
-            r = _sp.run(
-                [bin_path, 'tunnel', 'route', 'dns', tunnel_name, '--help'],
-                capture_output=True, text=True, timeout=5
-            )
-        except Exception:
-            pass
-        # If we still can't find it, the user must set it — use tunnel name as hint
-        if not url:
-            queue_message(f"INFO: Named tunnel '{tunnel_name}' — could not auto-detect hostname, check DNS config")
+    hostname = CONFIG['ACCESS'].get('tunnel_hostname', '').strip()
+    if hostname:
+        url = f'https://{hostname}'
+    else:
+        url = f'https://{tunnel_name} (set tunnel_hostname in config)'
 
     # Write a minimal config for the named tunnel to route traffic to the local port
     import tempfile
@@ -2224,31 +2196,12 @@ def _start_named_tunnel(bin_path, port, tunnel_name):
     except Exception as e:
         return False, str(e)
 
-    # Wait briefly for the process to start and verify it's running
+    # Wait briefly and verify it's running
     import time
     time.sleep(2)
     if proc.poll() is not None:
         stderr = proc.stderr.read()
         return False, f'Named tunnel failed to start: {stderr}'
-
-    # If we couldn't auto-detect the URL, parse stderr for connection info
-    if not url:
-        url_pattern = re.compile(r'https://[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
-        deadline = time.time() + 15
-        while time.time() < deadline:
-            line = proc.stderr.readline()
-            if not line:
-                if proc.poll() is not None:
-                    break
-                continue
-            match = url_pattern.search(line)
-            if match and 'cfargotunnel.com' not in match.group(0):
-                url = match.group(0)
-                break
-
-    if not url:
-        # Last resort: use the tunnel name as a hint
-        url = f'https://{tunnel_name} (check DNS)'
 
     _tunnel_process = proc
     _tunnel_url = url
@@ -3577,5 +3530,20 @@ def _parse_movement_steps(src):
 def start_flask_app(port=None):
     if port is None:
         port = CONFIG['ACCESS'].get('webui_port', 80)
+
+    # Auto-start named tunnel if configured
+    tunnel_name = CONFIG['ACCESS'].get('tunnel_name', '').strip()
+    if tunnel_name:
+        def _auto_tunnel():
+            import time
+            time.sleep(2)  # Let Flask bind the port first
+            if _cloudflared_bin():
+                ok, result = _start_tunnel()
+                if not ok:
+                    queue_message(f"WARNING: Auto-start tunnel failed: {result}")
+            else:
+                queue_message("INFO: cloudflared not installed, skipping auto-start tunnel")
+        threading.Thread(target=_auto_tunnel, daemon=True).start()
+
     queue_message(f"INFO: Starting Flask app on port {port}...")
     socketio.run(flask_app, host="0.0.0.0", port=port, log_output=False, allow_unsafe_werkzeug=True)

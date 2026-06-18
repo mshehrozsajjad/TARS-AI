@@ -228,6 +228,8 @@ webui_theme = default
 # Cloudflare named tunnel for static URL (leave empty for random quick-tunnel URL)
 # Setup: cloudflared tunnel login && cloudflared tunnel create <name> && cloudflared tunnel route dns <name> subdomain.yourdomain.com
 tunnel_name =
+# Hostname for named tunnel (e.g. tars.myclosr.site) — auto-starts tunnel on boot when set
+tunnel_hostname =
 
 [UI]
 # On-device display width in pixels (3.5" = 480, 5–7" = 800)
