@@ -613,7 +613,14 @@ class STTManager:
                 is_silence, detected_speech, silent_frames = vad_func(data, detected_speech, silent_frames)
 
                 # Pre-speech timeout: if no speech detected and silence exceeds threshold, exit early
-                if not detected_speech and silent_frames >= max_silent:
+                # Extend timeout while a gesture is running — user naturally waits for it to finish
+                _gesture_running = False
+                try:
+                    from modules.module_gestures import gesture_active
+                    _gesture_running = gesture_active
+                except Exception:
+                    pass
+                if not detected_speech and silent_frames >= max_silent and not _gesture_running:
                     _, clear_bar = self._get_progress_bar()
                     clear_bar()
                     print(f"[DEBUG] No speech after {silent_frames} frames, giving up", flush=True)

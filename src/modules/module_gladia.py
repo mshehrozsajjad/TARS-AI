@@ -150,7 +150,15 @@ def transcribe_streaming(stt_manager):
             # Run local VAD
             is_silence, detected_speech, silent_frames = vad_func(data, detected_speech, silent_frames)
 
-            if not detected_speech and silent_frames >= max_silent_pre_speech:
+            # Extend pre-speech timeout while a gesture is running —
+            # user naturally waits for the gesture to finish before speaking
+            _gesture_running = False
+            try:
+                from modules.module_gestures import gesture_active
+                _gesture_running = gesture_active
+            except Exception:
+                pass
+            if not detected_speech and silent_frames >= max_silent_pre_speech and not _gesture_running:
                 break  # No speech detected, give up
 
             if is_silence and detected_speech and speech_frames >= min_speech_frames:
