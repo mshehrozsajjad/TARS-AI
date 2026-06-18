@@ -64,6 +64,11 @@ _gesture_lock = threading.Lock()
 def execute_gesture(name):
     """Execute a gesture by name. Blocks until complete.
 
+    Temporarily disables the movement start/end callbacks so the gesture
+    does NOT pause STT or UI. This is critical — gestures run during or
+    right after speech, and pausing STT would cause the conversation to
+    drop into sleep mode.
+
     Skips silently if:
       - Another gesture is already running
       - The gesture name is unknown
@@ -85,12 +90,23 @@ def execute_gesture(name):
         _gesture_lock.release()
         return
 
+    import modules.module_servoctl as servoctl
+
+    # Save and disable movement callbacks so gesture doesn't pause STT
+    old_start = servoctl._on_movement_start
+    old_end = servoctl._on_movement_end
+    servoctl._on_movement_start = None
+    servoctl._on_movement_end = None
+
     try:
         queue_message(f"GESTURE: {name}")
         gesture["fn"]()
     except Exception as e:
         queue_message(f"WARNING: Gesture '{name}' failed: {e}")
     finally:
+        # Restore original callbacks
+        servoctl._on_movement_start = old_start
+        servoctl._on_movement_end = old_end
         _gesture_lock.release()
 
 
