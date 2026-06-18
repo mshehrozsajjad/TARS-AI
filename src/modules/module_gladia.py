@@ -76,7 +76,7 @@ def transcribe_streaming(stt_manager):
             sample_rate=16000,
             bit_depth=16,
             channels=1,
-            language_config=LiveV2LanguageConfig(languages=["en"]),
+            language_config=LiveV2LanguageConfig(languages=["en"], code_switching=False),
             messages_config=LiveV2MessagesConfig(
                 receive_partial_transcripts=False,
             ),
