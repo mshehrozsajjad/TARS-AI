@@ -1004,20 +1004,20 @@ def train_face():
     frames_tried = 0
     max_attempts = num_samples * 3  # allow some failed frames
 
-    import pygame as _pg
-
     while len(embeddings) < num_samples and frames_tried < max_attempts:
         frames_tried += 1
         try:
-            # Capture frame from existing camera singleton
-            frame = camera.get_frame()
-            if frame is None:
+            # Capture JPEG bytes from camera (no pygame dependency)
+            jpeg_bytes = camera.capture_bytes()
+            if jpeg_bytes is None:
                 time.sleep(0.2)
                 continue
-            frame_array = _pg.surfarray.array3d(frame)
-            frame_array = np.transpose(frame_array, (1, 0, 2))
-            frame_array = np.ascontiguousarray(frame_array)
-            frame_bgr = cv2.cvtColor(frame_array, cv2.COLOR_RGB2BGR)
+            # Decode JPEG to BGR numpy array
+            jpg_array = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+            frame_bgr = cv2.imdecode(jpg_array, cv2.IMREAD_COLOR)
+            if frame_bgr is None:
+                time.sleep(0.2)
+                continue
 
             h, w = frame_bgr.shape[:2]
             recognizer.detector.setInputSize((w, h))
