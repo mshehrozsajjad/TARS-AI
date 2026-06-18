@@ -14,6 +14,7 @@ free for the recording loop.
 """
 
 import os
+import time
 import threading
 
 from modules.module_messageQue import queue_message
@@ -86,6 +87,7 @@ def transcribe_streaming(stt_manager):
 
     final_transcript = None
     done = threading.Event()
+    t_start = time.monotonic()
 
     with _client.listen.v2.connect(
         model="flux-general-en",
@@ -97,13 +99,9 @@ def transcribe_streaming(stt_manager):
             nonlocal final_transcript
             msg_type = message.get("type", "Unknown") if isinstance(message, dict) else getattr(message, "type", "Unknown")
 
-            # Skip non-transcript messages
+            # Skip non-transcript messages silently
             if msg_type in ("Connected", "Metadata"):
-                print(f"[DEEPGRAM] {msg_type}", flush=True)
                 return
-
-            # Debug: log transcript-bearing messages
-            print(f"[DEEPGRAM] Message type={msg_type}: {message}", flush=True)
 
             text = _extract_transcript(message)
             if text and text.strip():
@@ -124,6 +122,8 @@ def transcribe_streaming(stt_manager):
         # for the recording loop.
         listener = threading.Thread(target=connection.start_listening, daemon=True)
         listener.start()
+        t_connected = time.monotonic()
+        print(f"[DEEPGRAM] Connected in {(t_connected - t_start)*1000:.0f}ms", flush=True)
 
         # Get VAD function from STT manager
         vad_dispatch = {
@@ -197,6 +197,8 @@ def transcribe_streaming(stt_manager):
                     speech_frames += 1
 
         # Signal end of audio — Deepgram finalizes the transcript
+        t_vad_done = time.monotonic()
+        print(f"[DEEPGRAM] Recording done in {(t_vad_done - t_connected)*1000:.0f}ms ({speech_frames} speech frames)", flush=True)
         connection.send_close_stream()
 
         if speech_frames < min_speech_frames:
@@ -207,10 +209,11 @@ def transcribe_streaming(stt_manager):
         # Wait for final transcript — should arrive quickly since
         # Deepgram already received all audio in real-time
         done.wait(timeout=10.0)
+        t_result = time.monotonic()
 
     if final_transcript:
-        print(f"[DEEPGRAM] Final: {final_transcript}", flush=True)
+        print(f"[DEEPGRAM] Final ({(t_result - t_vad_done)*1000:.0f}ms after close): {final_transcript}", flush=True)
     else:
-        print("[DEEPGRAM] No transcript received", flush=True)
+        print(f"[DEEPGRAM] No transcript received ({(t_result - t_vad_done)*1000:.0f}ms waited)", flush=True)
 
     return final_transcript
