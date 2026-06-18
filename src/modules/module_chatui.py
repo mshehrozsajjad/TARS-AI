@@ -990,23 +990,14 @@ def train_face():
     except ImportError as e:
         return jsonify({"error": f"Missing dependency: {e}"}), 500
 
-    # Get camera
-    camera = None
+    # Use the existing CameraModule singleton (camera is already running in TARS)
     try:
         from UI.module_ui_camera import CameraModule
-        camera = CameraModule(640, 480)
-    except Exception:
-        pass
-
-    if camera is None:
-        try:
-            from picamera2 import Picamera2
-            _cam = Picamera2()
-            _cam.configure(_cam.create_still_configuration(main={"size": (640, 480), "format": "RGB888"}))
-            _cam.start()
-            camera = _cam
-        except Exception as e:
-            return jsonify({"error": f"Camera not available: {e}"}), 503
+        camera = CameraModule(640, 480)  # singleton — returns the existing instance
+        if not camera.running:
+            return jsonify({"error": "Camera is not running"}), 503
+    except Exception as e:
+        return jsonify({"error": f"Camera not available: {e}"}), 503
 
     recognizer = HeadlessFaceRecognizer()
     embeddings = []
@@ -1018,20 +1009,15 @@ def train_face():
     while len(embeddings) < num_samples and frames_tried < max_attempts:
         frames_tried += 1
         try:
-            # Capture frame
-            if hasattr(camera, 'get_frame'):
-                frame = camera.get_frame()
-                if frame is None:
-                    time.sleep(0.2)
-                    continue
-                frame_array = _pg.surfarray.array3d(frame)
-                frame_array = np.transpose(frame_array, (1, 0, 2))
-                frame_array = np.ascontiguousarray(frame_array)
-                frame_bgr = cv2.cvtColor(frame_array, cv2.COLOR_RGB2BGR)
-            else:
-                # picamera2 direct
-                rgb = camera.capture_array()
-                frame_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            # Capture frame from existing camera singleton
+            frame = camera.get_frame()
+            if frame is None:
+                time.sleep(0.2)
+                continue
+            frame_array = _pg.surfarray.array3d(frame)
+            frame_array = np.transpose(frame_array, (1, 0, 2))
+            frame_array = np.ascontiguousarray(frame_array)
+            frame_bgr = cv2.cvtColor(frame_array, cv2.COLOR_RGB2BGR)
 
             h, w = frame_bgr.shape[:2]
             recognizer.detector.setInputSize((w, h))
