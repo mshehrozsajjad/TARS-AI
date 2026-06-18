@@ -321,6 +321,43 @@ document.addEventListener('DOMContentLoaded', function () {
 
   audioPlayer.addEventListener('ended', stop_talking);
 
+  // DND (Do Not Disturb) button — mutes the device microphone
+  const dndBtn = document.getElementById('dndButton');
+  if (dndBtn) {
+    let isDnd = false;
+    fetch('/api/dnd').then(r => r.json()).then(d => {
+      isDnd = d.paused;
+      _updateDndUI();
+    }).catch(() => {});
+
+    function _updateDndUI() {
+      const icon = document.getElementById('dndIcon');
+      if (isDnd) {
+        icon.className = 'bi bi-mic-mute-fill';
+        dndBtn.style.color = '#ff4444';
+        dndBtn.title = 'Do Not Disturb ON (mic paused) — click to resume';
+      } else {
+        icon.className = 'bi bi-mic-fill';
+        dndBtn.style.color = '';
+        dndBtn.title = 'Toggle Do Not Disturb (mute mic)';
+      }
+    }
+
+    dndBtn.addEventListener('click', async function() {
+      isDnd = !isDnd;
+      _updateDndUI();
+      try {
+        const r = await fetch('/api/dnd', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ paused: isDnd })
+        });
+        const d = await r.json();
+        if (!d.success) { isDnd = !isDnd; _updateDndUI(); }
+      } catch (e) { isDnd = !isDnd; _updateDndUI(); }
+    });
+  }
+
   // When phone app returns from background, reset stale audio state
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) {

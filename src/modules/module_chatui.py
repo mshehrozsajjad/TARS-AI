@@ -958,6 +958,43 @@ def camera_feed():
     return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 
+@flask_app.route('/api/dnd', methods=['GET'])
+def get_dnd_status():
+    """Get current DND (Do Not Disturb) state."""
+    try:
+        from modules.module_state import get_stt_manager
+        stt = get_stt_manager()
+        paused = stt.is_paused() if stt else False
+        return jsonify({"paused": paused})
+    except Exception:
+        return jsonify({"paused": False})
+
+
+@flask_app.route('/api/dnd', methods=['POST'])
+def toggle_dnd():
+    """Toggle DND mode — pauses/resumes the microphone."""
+    try:
+        from modules.module_state import get_stt_manager, set_tars_state, TarsState
+        stt = get_stt_manager()
+        if stt is None:
+            return jsonify({"error": "STT manager not available"}), 503
+
+        data = request.get_json(silent=True) or {}
+        paused = data.get('paused', not stt.is_paused())
+
+        if paused:
+            stt.pause()
+            set_tars_state(TarsState.STANDBY)
+            queue_message("DND: Microphone paused (Do Not Disturb ON)")
+        else:
+            stt.resume()
+            queue_message("DND: Microphone resumed (Do Not Disturb OFF)")
+
+        return jsonify({"success": True, "paused": paused})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @flask_app.route('/api/awareness', methods=['GET'])
 def awareness_status():
     """Debug endpoint — check awareness system state."""
