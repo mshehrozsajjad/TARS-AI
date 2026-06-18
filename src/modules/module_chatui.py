@@ -990,6 +990,15 @@ def toggle_dnd():
             stt.resume()
             queue_message("DND: Microphone resumed (Do Not Disturb OFF)")
 
+        # Update Lite UI DND indicator
+        try:
+            import modules.module_main as _main
+            ui = getattr(_main, 'ui_manager', None)
+            if ui and hasattr(ui, 'set_dnd'):
+                ui.set_dnd(paused)
+        except Exception:
+            pass
+
         return jsonify({"success": True, "paused": paused})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
