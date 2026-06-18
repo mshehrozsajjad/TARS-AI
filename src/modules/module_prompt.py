@@ -717,6 +717,9 @@ Current Time: {now.strftime('%H:%M:%S')}
     id_dur = speed.stop('identity')
     if speaker_ctx:
         base_prompt += f"\n{speaker_ctx}"
+        queue_message(f"IDENTITY PROMPT: {speaker_ctx[:120]}")
+    else:
+        queue_message("IDENTITY PROMPT: empty (no speaker identified)")
 
     # Emotional state context (if emotion detection is enabled)
     try:
