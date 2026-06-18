@@ -304,6 +304,7 @@ class AwarenessManager:
         self._server_url = awareness_cfg.get("server_url", "")
         self._proactive_greetings = str(awareness_cfg.get("proactive_greetings", "true")).lower() == "true"
         self._departure_timeout = int(awareness_cfg.get("departure_timeout", 30))
+        self._face_mode = awareness_cfg.get("face_recognition", "server")  # "server" or "local"
 
         # Components
         self._face_recognizer = None
@@ -317,7 +318,7 @@ class AwarenessManager:
         self._quiet_start = int(drives_cfg.get("quiet_start", 23))
         self._quiet_end = int(drives_cfg.get("quiet_end", 7))
 
-        if self._enabled:
+        if self._enabled and self._face_mode == "local":
             self._face_recognizer = HeadlessFaceRecognizer()
 
     def start(self):
@@ -398,18 +399,13 @@ class AwarenessManager:
 
     def _do_face_detection(self):
         """Capture frame, detect/identify faces, update presence."""
-        if self._face_recognizer is None:
+        if self._face_mode == "server":
+            faces = self._detect_faces_server()
+        else:
+            faces = self._detect_faces_local()
+
+        if faces is None:
             return
-
-        frame = self._capture_frame_bgr()
-        if frame is None:
-            return
-
-        # Periodically reload database to pick up faces trained via UI
-        if int(time.time()) % 30 == 0:
-            self._face_recognizer.reload_database()
-
-        faces = self._face_recognizer.detect_and_identify(frame)
 
         # Update presence tracker
         events = self._presence.update(faces)
@@ -432,6 +428,52 @@ class AwarenessManager:
                 if self._ui_manager:
                     self._ui_manager.update_data("System", f"{event['name']} left", "INFO")
                 self._notify_drives_presence()
+
+    def _detect_faces_server(self):
+        """Send frame to companion server for InsightFace recognition."""
+        frame = self._capture_frame_bgr()
+        if frame is None:
+            return None
+
+        jpeg = self._capture_jpeg(frame)
+        try:
+            import requests
+            headers = {}
+            api_key = os.environ.get('EXTERNAL_API_KEY', '')
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+
+            files = {'image': ('frame.jpg', io.BytesIO(jpeg), 'image/jpeg')}
+            response = requests.post(
+                f"{self._server_url}/face/recognize",
+                files=files,
+                headers=headers,
+                timeout=5,
+            )
+            if response.status_code == 200:
+                return response.json().get("faces", [])
+            else:
+                return None
+        except requests.exceptions.ConnectionError:
+            return None  # Server not running — silent
+        except Exception as e:
+            queue_message(f"WARNING: Server face recognition failed: {e}")
+            return None
+
+    def _detect_faces_local(self):
+        """Run on-device YuNet+SFace face recognition."""
+        if self._face_recognizer is None:
+            return None
+
+        frame = self._capture_frame_bgr()
+        if frame is None:
+            return None
+
+        # Periodically reload database to pick up faces trained via UI
+        if int(time.time()) % 30 == 0:
+            self._face_recognizer.reload_database()
+
+        return self._face_recognizer.detect_and_identify(frame)
 
     def _notify_drives_presence(self):
         """Notify the drives system about presence changes."""
@@ -499,7 +541,13 @@ class AwarenessManager:
 
             # Play TTS directly (same as wake_word_callback)
             set_tars_state(TarsState.TALKING)
-            asyncio.run(play_audio_chunks(line, config['TTS']['ttsoption'], True))
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(play_audio_chunks(line, config['TTS']['ttsoption'], True))
+                loop.close()
+            except Exception as tts_err:
+                queue_message(f"WARNING: Greeting TTS failed: {tts_err}")
             set_tars_state(TarsState.LISTENING)
 
             # Enter conversation mode — listen for response without wake word

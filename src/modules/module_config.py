@@ -604,6 +604,7 @@ def load_config():
             "face_interval": config.get('AWARENESS', 'face_interval', fallback='3'),
             "scene_interval": config.get('AWARENESS', 'scene_interval', fallback='60'),
             "server_url": config.get('AWARENESS', 'server_url', fallback=''),
+            "face_recognition": config.get('AWARENESS', 'face_recognition', fallback='server'),
             "proactive_greetings": config.get('AWARENESS', 'proactive_greetings', fallback='true'),
             "departure_timeout": config.get('AWARENESS', 'departure_timeout', fallback='30'),
         },

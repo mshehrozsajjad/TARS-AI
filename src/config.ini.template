@@ -331,8 +331,10 @@ enabled = False
 face_interval = 3
 # Seconds between scene descriptions via companion server (60 = once per minute)
 scene_interval = 60
-# Companion server URL for BLIP scene captioning (leave empty to skip scene captioning)
+# Companion server URL for scene captioning and server-side face recognition
 server_url =
+# Face recognition mode: server (InsightFace on companion server) | local (YuNet+SFace on device)
+face_recognition = server
 # Greet people by name when they arrive after being absent
 proactive_greetings = True
 # Seconds without detection before a person is considered departed

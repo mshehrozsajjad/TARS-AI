@@ -35,6 +35,10 @@ diffusers>=0.27.0
 # Embeddings
 sentence-transformers>=2.2.0
 
+# Face Recognition (InsightFace + ONNX Runtime)
+insightface>=1.0.0
+onnxruntime>=1.14.0
+
 # QR code generation for tunnel URLs
 qrcode[pil]>=7.0
 

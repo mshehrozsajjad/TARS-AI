@@ -982,12 +982,90 @@ def awareness_status():
 @flask_app.route('/api/faces', methods=['GET'])
 def list_faces():
     """List all enrolled faces."""
+    from modules.module_config import load_config as _lc
+    _cfg = _lc()
+    _face_mode = _cfg.get('AWARENESS', {}).get('face_recognition', 'server')
+    server_url = _cfg.get('AWARENESS', {}).get('server_url', '')
+
+    if _face_mode == "server" and server_url:
+        try:
+            import requests as _req
+            headers = {}
+            api_key = os.environ.get('EXTERNAL_API_KEY', '')
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+            resp = _req.get(f"{server_url}/face/list", headers=headers, timeout=5)
+            if resp.status_code == 200:
+                return jsonify(resp.json())
+        except Exception as e:
+            return jsonify({"error": f"Server unreachable: {e}"}), 503
+
     try:
         from modules.module_awareness import HeadlessFaceRecognizer
         recognizer = HeadlessFaceRecognizer()
         return jsonify({"faces": recognizer.known_names})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+def _train_face_server(name, num_samples, config):
+    """Train a face via companion server's InsightFace."""
+    import requests as _req
+    import io as _io
+
+    server_url = config.get('AWARENESS', {}).get('server_url', '')
+    if not server_url:
+        return jsonify({"error": "server_url not configured in [AWARENESS]"}), 400
+
+    try:
+        from UI.module_ui_camera import CameraModule
+        camera = CameraModule(640, 480)
+    except Exception as e:
+        return jsonify({"error": f"Camera not available: {e}"}), 503
+
+    # Wait for camera frame
+    if camera._frame is None:
+        for _ in range(50):
+            time.sleep(0.1)
+            if camera._frame is not None:
+                break
+        if camera._frame is None:
+            return jsonify({"error": "Camera has no frames yet"}), 503
+
+    headers = {}
+    api_key = os.environ.get('EXTERNAL_API_KEY', '')
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    enrolled = 0
+    for i in range(num_samples):
+        try:
+            jpeg = camera.capture_bytes(timeout=2)
+            if jpeg is None:
+                continue
+            files = {'image': ('frame.jpg', _io.BytesIO(jpeg), 'image/jpeg')}
+            resp = _req.post(
+                f"{server_url}/face/train",
+                files=files,
+                data={'name': name},
+                headers=headers,
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                enrolled += 1
+                queue_message(f"FACE TRAIN: Server sample {enrolled}/{num_samples}")
+            elif resp.status_code == 400:
+                pass  # No face in this frame
+            time.sleep(0.15)
+        except Exception as e:
+            queue_message(f"WARNING: Server face train failed: {e}")
+            continue
+
+    if enrolled < 3:
+        return jsonify({"error": f"Only enrolled {enrolled} samples (need at least 3)"}), 400
+
+    queue_message(f"FACE: Enrolled '{name}' via server ({enrolled} samples)")
+    return jsonify({"status": "ok", "name": name, "samples": enrolled})
 
 
 @flask_app.route('/api/faces/train', methods=['POST'])
@@ -1005,6 +1083,16 @@ def train_face():
     name = data['name'].strip()
     num_samples = int(data.get('samples', 10))
 
+    # Check face recognition mode
+    from modules.module_config import load_config as _lc
+    _cfg = _lc()
+    _face_mode = _cfg.get('AWARENESS', {}).get('face_recognition', 'server')
+
+    # Server mode: capture JPEGs and POST to companion server /face/train
+    if _face_mode == "server":
+        return _train_face_server(name, num_samples, _cfg)
+
+    # Local mode: on-device YuNet+SFace
     try:
         import cv2
         import numpy as np
