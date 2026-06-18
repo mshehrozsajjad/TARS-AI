@@ -19,6 +19,52 @@ from modules.module_messageQue import queue_message
 _client = None
 
 
+def _extract_transcript(message):
+    """Extract transcript text from a Deepgram v2 message (dict or object)."""
+    # Messages arrive as plain dicts from the SDK
+    if isinstance(message, dict):
+        msg_type = message.get("type", "")
+
+        # v2 TurnInfo: {"type": "TurnInfo", "transcript": "...", ...}
+        if "transcript" in message:
+            return message["transcript"]
+
+        # v2 nested channel structure
+        if "channel" in message:
+            try:
+                return message["channel"]["alternatives"][0]["transcript"]
+            except (KeyError, IndexError, TypeError):
+                pass
+
+        # v2 turn_info wrapper
+        if "turn_info" in message:
+            ti = message["turn_info"]
+            if isinstance(ti, dict) and "transcript" in ti:
+                return ti["transcript"]
+
+        # v2 data wrapper
+        if "data" in message:
+            d = message["data"]
+            if isinstance(d, dict) and "transcript" in d:
+                return d["transcript"]
+
+        return None
+
+    # Fallback: SDK object with attributes
+    text = getattr(message, "transcript", None)
+    if text is not None:
+        return text
+
+    try:
+        channel = getattr(message, "channel", None)
+        if channel:
+            return channel.alternatives[0].transcript
+    except Exception:
+        pass
+
+    return None
+
+
 def transcribe_streaming(stt_manager):
     """Stream mic audio to Deepgram while using local VAD for end-of-speech.
 
@@ -65,57 +111,20 @@ def transcribe_streaming(stt_manager):
 
         def on_message(message):
             nonlocal final_transcript
-            msg_type = getattr(message, "type", "Unknown")
-            msg_class = type(message).__name__
-            print(f"[DEEPGRAM] Message: type={msg_type}, class={msg_class}", flush=True)
+            msg_type = message.get("type", "Unknown") if isinstance(message, dict) else getattr(message, "type", "Unknown")
+            print(f"[DEEPGRAM] Message: type={msg_type}", flush=True)
 
-            # Log structure of every message for debugging
-            try:
-                attrs = [a for a in dir(message) if not a.startswith('_')]
-                print(f"[DEEPGRAM] DEBUG attrs: {attrs}", flush=True)
-                print(f"[DEEPGRAM] DEBUG repr: {message}", flush=True)
-            except Exception:
-                pass
+            # Skip connection/metadata messages
+            if msg_type in ("Connected", "Metadata"):
+                return
 
-            # Try to extract transcript from any message type
-            text = None
+            # Debug: log full message for non-trivial types
+            print(f"[DEEPGRAM] DEBUG payload: {message}", flush=True)
 
-            # Path 1: direct .transcript attribute
-            text = getattr(message, "transcript", None)
-
-            # Path 2: nested channel structure
-            if text is None:
-                try:
-                    channels = getattr(message, "channels", None) or getattr(message, "channel", None)
-                    if channels:
-                        if isinstance(channels, list):
-                            text = channels[0].alternatives[0].transcript
-                        else:
-                            text = channels.alternatives[0].transcript
-                except Exception:
-                    pass
-
-            # Path 3: turn_info nested object
-            if text is None:
-                try:
-                    turn_info = getattr(message, "turn_info", None)
-                    if turn_info:
-                        text = getattr(turn_info, "transcript", None)
-                except Exception:
-                    pass
-
-            # Path 4: data nested object
-            if text is None:
-                try:
-                    data = getattr(message, "data", None)
-                    if data:
-                        text = getattr(data, "transcript", None)
-                except Exception:
-                    pass
-
+            text = _extract_transcript(message)
             if text and text.strip():
                 final_transcript = text.strip()
-                print(f"[DEEPGRAM] Extracted transcript: {final_transcript}", flush=True)
+                print(f"[DEEPGRAM] Transcript: {final_transcript}", flush=True)
                 done.set()
 
         def on_error(error):
@@ -150,7 +159,7 @@ def transcribe_streaming(stt_manager):
         max_silent_post_speech = stt_manager.MAX_SILENT_FRAMES
         min_speech_frames = 5
 
-        print(f"[DEBUG] Deepgram: starting stream, vad={stt_manager.vadmethod}", flush=True)
+        print(f"[DEEPGRAM] Starting stream, vad={stt_manager.vadmethod}", flush=True)
 
         with ResamplingInputStream(dtype="int16") as mic:
             # Flush stale mic audio from TTS
@@ -161,12 +170,13 @@ def transcribe_streaming(stt_manager):
             except Exception:
                 pass
 
-            for _ in range(stt_manager.MAX_RECORDING_FRAMES):
+            for frame_idx in range(stt_manager.MAX_RECORDING_FRAMES):
                 data, _ = mic.read(4000)
 
                 # Abort if TTS started
                 if is_tts_playing():
                     set_tars_state(TarsState.STANDBY)
+                    print("[DEEPGRAM] Aborting — TTS started playing", flush=True)
                     connection.send_close_stream()
                     done.wait(timeout=2)
                     return None
@@ -185,11 +195,13 @@ def transcribe_streaming(stt_manager):
                 except Exception:
                     pass
                 if not detected_speech and silent_frames >= max_silent_pre_speech and not _gesture_running:
-                    break  # No speech detected, give up
+                    print(f"[DEEPGRAM] No speech detected after {frame_idx+1} frames, giving up", flush=True)
+                    break
 
                 if is_silence and detected_speech and speech_frames >= min_speech_frames:
                     if silent_frames >= max_silent_post_speech:
-                        break  # End of speech
+                        print(f"[DEEPGRAM] End of speech after {speech_frames} frames", flush=True)
+                        break
 
                 if detected_speech and not is_silence:
                     if speech_frames == 0:
@@ -200,6 +212,7 @@ def transcribe_streaming(stt_manager):
         connection.send_close_stream()
 
         if speech_frames < min_speech_frames:
+            print(f"[DEEPGRAM] Too few speech frames ({speech_frames}), discarding", flush=True)
             done.wait(timeout=2)
             return None
 
@@ -208,6 +221,8 @@ def transcribe_streaming(stt_manager):
         done.wait(timeout=10.0)
 
     if final_transcript:
-        print(f"[DEEPGRAM] {final_transcript}", flush=True)
+        print(f"[DEEPGRAM] Final: {final_transcript}", flush=True)
+    else:
+        print("[DEEPGRAM] No transcript received", flush=True)
 
     return final_transcript
