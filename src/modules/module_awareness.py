@@ -371,60 +371,20 @@ class AwarenessManager:
             time.sleep(0.5)
 
     def _capture_frame_bgr(self):
-        """Capture a frame as a BGR numpy array.
+        """Capture a frame as a BGR numpy array via the CameraModule singleton.
 
-        Tries CameraModule first (shared with UI), falls back to picamera2.
+        Uses capture_bytes() → JPEG decode, same path as the working /camera_feed endpoint.
         """
         import cv2
 
-        # Try UI camera module (singleton, already running)
-        if self._ui_manager is not None:
-            camera = getattr(self._ui_manager, 'camera_module', None)
-            if camera is not None:
-                try:
-                    frame = camera.get_frame()
-                    if frame is not None:
-                        import pygame
-                        # Convert pygame surface to numpy BGR
-                        frame_array = pygame.surfarray.array3d(frame)
-                        frame_array = np.transpose(frame_array, (1, 0, 2))
-                        frame_array = np.ascontiguousarray(frame_array)
-                        return cv2.cvtColor(frame_array, cv2.COLOR_RGB2BGR)
-                except Exception:
-                    pass
-
-        # Try CameraModule singleton directly
         try:
-            from modules.UI.module_ui_camera import CameraModule
-            camera = CameraModule(640, 480)
-            frame = camera.get_frame()
-            if frame is not None:
-                import pygame
-                frame_array = pygame.surfarray.array3d(frame)
-                frame_array = np.transpose(frame_array, (1, 0, 2))
-                frame_array = np.ascontiguousarray(frame_array)
-                return cv2.cvtColor(frame_array, cv2.COLOR_RGB2BGR)
-        except Exception:
-            pass
-
-        # Fall back to picamera2 directly (headless)
-        if self._camera is None:
-            try:
-                from picamera2 import Picamera2
-                self._camera = Picamera2()
-                cam_config = self._camera.create_still_configuration(
-                    main={"size": (640, 480), "format": "RGB888"}
-                )
-                self._camera.configure(cam_config)
-                self._camera.start()
-            except Exception as e:
-                queue_message(f"WARNING: Awareness camera init failed: {e}")
-                self._camera = None
+            from UI.module_ui_camera import CameraModule
+            camera = CameraModule(640, 480)  # singleton — returns existing instance
+            jpeg_bytes = camera.capture_bytes(timeout=2)
+            if jpeg_bytes is None:
                 return None
-
-        try:
-            rgb = self._camera.capture_array()
-            return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            jpg_array = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+            return cv2.imdecode(jpg_array, cv2.IMREAD_COLOR)
         except Exception:
             return None
 
