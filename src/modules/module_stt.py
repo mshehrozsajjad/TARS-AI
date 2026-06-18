@@ -1432,6 +1432,8 @@ class STTManager:
             for _ in range(100):
                 if not self.running or self.shutdown_event.is_set():
                     break
+                if self.is_paused():
+                    break
 
                 # Abort wake word detection if TTS started
                 if is_tts_playing():
@@ -1493,7 +1495,11 @@ class STTManager:
         while is_tts_playing():
             time.sleep(0.05)
         while True:
+            if self.is_paused():
+                return False
             detector.listenForWakeWord()
+            if self.is_paused():
+                return False
             audio_window = np.array(list(detector.buffer)[-int(self.MODEL_RATE * 2):], dtype=np.float32)
             if self._run_wake_gates(audio_window, transcript_verify_fn=transcript_verify_fn):
                 self._handle_wake_detected()
@@ -1540,6 +1546,9 @@ class STTManager:
             audio_buffer[:] = buf.flatten()
 
             while self.running and not self.shutdown_event.is_set():
+                # Abort if paused (DND mode)
+                if self.is_paused():
+                    break
                 # Abort wake word detection if TTS started
                 if is_tts_playing():
                     break
