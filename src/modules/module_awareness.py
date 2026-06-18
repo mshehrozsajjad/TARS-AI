@@ -504,6 +504,7 @@ class AwarenessManager:
                 if caption:
                     self._scene_description = caption
                     self._last_scene_time = time.time()
+                    queue_message(f"AWARENESS: Scene: {caption}")
             else:
                 queue_message(f"WARNING: Scene caption server returned {response.status_code}")
 
