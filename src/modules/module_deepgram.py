@@ -64,9 +64,6 @@ def transcribe_streaming(stt_manager):
         model="flux-general-en",
         encoding="linear16",
         sample_rate=16000,
-        language="en",
-        punctuate=True,
-        smart_format=True,
     ) as connection:
 
         def on_message(message):
