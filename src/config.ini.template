@@ -98,10 +98,10 @@ vad_presence_gate = off
 # Wake word strictness 1–10 (atomik only; 1 = lenient, 10 = strict)
 sensitivity = 7
 # Speech-to-text engine (independent of wake_word_processor — mix freely)
-#   Pi5: sherpa-onnx | fastrtc | silero | openai | gladia | external
-#   Pi4: sherpa-onnx | openai | gladia | external
-#   Pi3: openai | gladia | external
-#   PiZero2: openai | gladia
+#   Pi5: sherpa-onnx | fastrtc | silero | openai | gladia | deepgram | external
+#   Pi4: sherpa-onnx | openai | gladia | deepgram | external
+#   Pi3: openai | gladia | deepgram | external
+#   PiZero2: openai | gladia | deepgram
 stt_processor = sherpa-onnx
 # Play beep when listening starts and stops
 use_indicators = True

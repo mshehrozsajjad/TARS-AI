@@ -779,6 +779,7 @@ class STTManager:
                 "openai": self._transcribe_with_openai,
                 "sherpa-onnx": self._transcribe_with_sherpa_onnx,
                 "gladia": self._transcribe_with_gladia,
+                "deepgram": self._transcribe_with_deepgram,
             }
             processor = self.config["STT"].get("stt_processor", "fastrtc")
             queue_message(f"DEBUG STT: Dispatching to '{processor}'")
@@ -1114,6 +1115,16 @@ class STTManager:
 
         transcript = transcribe_streaming(self)
         print(f"[DEBUG] Gladia returned: {transcript!r}", flush=True)
+        if not transcript:
+            return None
+        return self._emit_result(transcript)
+
+    def _transcribe_with_deepgram(self):
+        """Stream mic audio to Deepgram using v2 API with local VAD."""
+        from modules.module_deepgram import transcribe_streaming
+
+        transcript = transcribe_streaming(self)
+        print(f"[DEBUG] Deepgram returned: {transcript!r}", flush=True)
         if not transcript:
             return None
         return self._emit_result(transcript)
