@@ -201,13 +201,14 @@ def utterance_callback(message):
             if stt_manager:
                 stt_manager.start_bargein_monitor(tts_text="")
             # Fire gesture in parallel with speech start
-            if _pending_gesture[0]:
+            if _pending_gesture[0] and _pending_gesture[0] != '_fired':
                 try:
                     from modules.module_gestures import execute_gesture_async
                     execute_gesture_async(_pending_gesture[0])
                 except Exception as e:
                     queue_message(f"WARNING: Gesture failed: {e}")
-                _pending_gesture[0] = None
+            # Mark as fired so the parsed-response handler doesn't fire again
+            _pending_gesture[0] = '_fired'
 
         pipeline = SentenceTTSPipeline(
             CONFIG['TTS']['ttsoption'],
@@ -343,19 +344,21 @@ def utterance_callback(message):
             if fc:
                 queue_message(f"TOOLS: {fc}")
 
-        # Extract gesture from LLM response — fire during TTS playback
+        # Extract gesture from LLM response — set pending so _on_first_play fires it.
+        # If TTS already started (on_first_play already ran), fire immediately.
         if isinstance(parsed, dict):
             gesture_name = parsed.get("gesture")
             if gesture_name:
-                queue_message(f"GESTURE: {gesture_name}")
-                # If TTS hasn't started yet, queue for _on_first_play
-                # If TTS already started, fire immediately
-                if _pending_gesture[0] is None:
+                if _pending_gesture[0] == '_fired':
+                    # _on_first_play already ran — fire gesture now
                     try:
                         from modules.module_gestures import execute_gesture_async
                         execute_gesture_async(gesture_name)
                     except Exception as e:
                         queue_message(f"WARNING: Gesture failed: {e}")
+                else:
+                    # TTS hasn't started yet — queue for _on_first_play
+                    _pending_gesture[0] = gesture_name
 
         # Detect emotion (parallel-safe — runs while TTS thread plays sentences)
         speed.start('emotion')

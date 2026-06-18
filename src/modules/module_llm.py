@@ -714,6 +714,13 @@ def _sanitize_for_tts(text):
     if not isinstance(text, str):
         return text
 
+    # Convert Unicode smart quotes/dashes to ASCII equivalents
+    text = text.replace('\u2019', "'")   # right single quote
+    text = text.replace('\u2018', "'")   # left single quote
+    text = text.replace('\u201c', '"')   # left double quote
+    text = text.replace('\u201d', '"')   # right double quote
+    text = text.replace('\u2026', '...') # ellipsis
+
     text = text.replace(' — ', '... ')
     text = text.replace('— ', '... ')
     text = text.replace(' —', ' ...')
