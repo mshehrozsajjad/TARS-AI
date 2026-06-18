@@ -220,6 +220,18 @@ class DrivesManager:
             if self._battery is None:
                 self._drives["energy"] = min(100, self._drives["energy"] + 2)
 
+    def on_presence_change(self, present_people):
+        """Called by awareness module when people arrive or depart.
+
+        Args:
+            present_people: List of {name, duration_seconds} currently visible.
+        """
+        with self._lock:
+            if present_people:
+                # Someone is here — social need drops
+                self._drives["social"] = max(0, self._drives["social"] - 15)
+            # If nobody present, social will build naturally via _tick()
+
     # ── Proactive speech ────────────────────────────────────────────────────
 
     def _is_quiet_hours(self):

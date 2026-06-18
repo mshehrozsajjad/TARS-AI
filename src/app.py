@@ -419,6 +419,17 @@ if __name__ == "__main__":
         except Exception as e:
             queue_message(f"WARNING: Drives system not available: {e}")
 
+    # === Awareness System (24/7 face recognition + scene captioning) ===
+    awareness_manager = None
+    if CONFIG.get('AWARENESS', {}).get('enabled', 'false').lower() == 'true':
+        try:
+            from modules.module_awareness import AwarenessManager
+            awareness_manager = AwarenessManager(config=CONFIG, ui_manager=ui_manager)
+            awareness_manager.start()
+            queue_message("LOAD: Awareness system started")
+        except Exception as e:
+            queue_message(f"WARNING: Awareness system not available: {e}")
+
     # === Main Loop ===
     try:
         queue_message(f"LOAD: TARS-AI OS: {VERSION} running on {RASPBERRY_VERSION.upper()}")
@@ -448,6 +459,9 @@ if __name__ == "__main__":
         except Exception:
             pass
         stt_manager.stop()
+        # Stop awareness system
+        if awareness_manager is not None:
+            awareness_manager.stop()
         # Stop drives system
         if drives_manager is not None:
             drives_manager.stop()

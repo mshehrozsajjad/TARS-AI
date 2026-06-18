@@ -324,6 +324,20 @@ rightHandMin = 300
 rightHandMax = 420
 rightHandOffset = 0
 
+[AWARENESS]
+# Enable 24/7 ambient awareness (face recognition + scene captioning)
+enabled = False
+# Seconds between face detection frames (3 = responsive, 10 = lower CPU)
+face_interval = 3
+# Seconds between scene descriptions via companion server (60 = once per minute)
+scene_interval = 60
+# Companion server URL for BLIP scene captioning (leave empty to skip scene captioning)
+server_url =
+# Greet people by name when they arrive after being absent
+proactive_greetings = True
+# Seconds without detection before a person is considered departed
+departure_timeout = 30
+
 [DRIVES]
 # Enable internal drives system (curiosity, social need, energy, boredom)
 enabled = False

@@ -742,6 +742,17 @@ Current Time: {now.strftime('%H:%M:%S')}
     except Exception:
         pass
 
+    # Environment awareness context (who's present, scene description)
+    try:
+        from modules.module_awareness import get_awareness_manager
+        am = get_awareness_manager()
+        if am is not None:
+            awareness_ctx = am.get_awareness_context()
+            if awareness_ctx:
+                base_prompt += f"\n{awareness_ctx}"
+    except Exception:
+        pass
+
     # Memory retrieval (long-term + short-term + examples)
     speed.start('memory')
     final_prompt = append_memory_and_examples(
