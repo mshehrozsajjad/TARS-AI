@@ -418,6 +418,9 @@ class AwarenessManager:
         for event in events:
             if event["type"] == "arrived":
                 queue_message(f"AWARENESS: {event['name']} arrived")
+                # Show on Lite UI
+                if self._ui_manager:
+                    self._ui_manager.update_data("System", f"{event['name']} arrived", "INFO")
                 # Proactive greeting for notable arrivals
                 if event.get("notable") and self._proactive_greetings:
                     self._greet(event["name"])
@@ -425,6 +428,9 @@ class AwarenessManager:
                 self._notify_drives_presence()
             elif event["type"] == "departed":
                 queue_message(f"AWARENESS: {event['name']} departed")
+                # Show on Lite UI
+                if self._ui_manager:
+                    self._ui_manager.update_data("System", f"{event['name']} left", "INFO")
                 self._notify_drives_presence()
 
     def _notify_drives_presence(self):
@@ -447,7 +453,16 @@ class AwarenessManager:
             return self._quiet_start <= hour < self._quiet_end
 
     def _greet(self, name):
-        """Speak a proactive greeting when someone arrives."""
+        """Greet someone who arrived and enter conversation mode.
+
+        Follows the same flow as wake_word_callback:
+        1. Show greeting on Lite UI
+        2. Play TTS directly
+        3. Enter LISTENING state
+        4. Call _transcribe_utterance() to wait for response
+
+        The awareness thread blocks during the conversation and resumes after.
+        """
         if self._is_quiet_hours():
             return
 
@@ -459,6 +474,7 @@ class AwarenessManager:
             return
 
         import random
+        import asyncio
         greetings = [
             f"Hey {name}, good to see you.",
             f"Oh, {name}. Welcome back.",
@@ -469,8 +485,28 @@ class AwarenessManager:
         queue_message(f"AWARENESS: Greeting {name} — \"{line}\"")
 
         try:
-            from modules.module_router import send
-            send(line)
+            from modules.module_state import set_tars_state, TarsState, get_stt_manager
+            from modules.module_tts import play_audio_chunks
+            from modules.module_config import load_config
+
+            config = load_config()
+            char_name = config['CHAR'].get('character_name', 'TARS')
+
+            # Show greeting on Lite UI as TARS speaking
+            if self._ui_manager:
+                self._ui_manager.deactivate_screensaver()
+                self._ui_manager.update_data(char_name, line, char_name)
+
+            # Play TTS directly (same as wake_word_callback)
+            set_tars_state(TarsState.TALKING)
+            asyncio.run(play_audio_chunks(line, config['TTS']['ttsoption'], True))
+            set_tars_state(TarsState.LISTENING)
+
+            # Enter conversation mode — listen for response without wake word
+            stt = get_stt_manager()
+            if stt is not None:
+                stt._transcribe_utterance()
+
         except Exception as e:
             queue_message(f"WARNING: Awareness greeting failed: {e}")
 
