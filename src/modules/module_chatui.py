@@ -995,6 +995,15 @@ def train_face():
         from UI.module_ui_camera import CameraModule
         camera = CameraModule(640, 480)  # singleton — returns the existing instance
         queue_message(f"FACE TRAIN: Camera singleton running={camera.running}, frame={'yes' if camera._frame else 'no'}")
+        # Wait for camera to produce its first frame (up to 5 seconds)
+        if camera._frame is None:
+            for _ in range(50):
+                time.sleep(0.1)
+                if camera._frame is not None:
+                    break
+            if camera._frame is None:
+                return jsonify({"error": "Camera running but no frames available yet. Try again in a few seconds."}), 503
+        queue_message(f"FACE TRAIN: Frame ready, starting capture for '{name}'")
     except Exception as e:
         return jsonify({"error": f"Camera not available: {e}"}), 503
 
