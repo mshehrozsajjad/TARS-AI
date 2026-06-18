@@ -42,9 +42,6 @@ def transcribe_streaming(stt_manager):
     try:
         from deepgram import DeepgramClient
         from deepgram.core.events import EventType
-        from deepgram.listen.v2.types import (
-            ListenV2TurnInfo,
-        )
     except ImportError:
         print("[DEEPGRAM] ERROR: pip install deepgram-sdk", flush=True)
         return None
@@ -69,48 +66,57 @@ def transcribe_streaming(stt_manager):
         def on_message(message):
             nonlocal final_transcript
             msg_type = getattr(message, "type", "Unknown")
-            print(f"[DEEPGRAM] Message: type={msg_type}", flush=True)
+            msg_class = type(message).__name__
+            print(f"[DEEPGRAM] Message: type={msg_type}, class={msg_class}", flush=True)
 
-            if isinstance(message, ListenV2TurnInfo):
-                # Extract transcript — try multiple attribute paths since
-                # the v2 SDK response structure may vary across versions.
-                text = None
+            # Log structure of every message for debugging
+            try:
+                attrs = [a for a in dir(message) if not a.startswith('_')]
+                print(f"[DEEPGRAM] DEBUG attrs: {attrs}", flush=True)
+                print(f"[DEEPGRAM] DEBUG repr: {message}", flush=True)
+            except Exception:
+                pass
 
-                # Path 1: direct .transcript attribute
-                text = getattr(message, "transcript", None)
+            # Try to extract transcript from any message type
+            text = None
 
-                # Path 2: nested channel structure (v1-style)
-                if text is None:
-                    try:
-                        channels = getattr(message, "channels", None) or getattr(message, "channel", None)
-                        if channels:
-                            if isinstance(channels, list):
-                                text = channels[0].alternatives[0].transcript
-                            else:
-                                text = channels.alternatives[0].transcript
-                    except Exception:
-                        pass
+            # Path 1: direct .transcript attribute
+            text = getattr(message, "transcript", None)
 
-                # Path 3: turn_info nested object
-                if text is None:
-                    try:
-                        turn_info = getattr(message, "turn_info", None)
-                        if turn_info:
-                            text = getattr(turn_info, "transcript", None)
-                    except Exception:
-                        pass
+            # Path 2: nested channel structure
+            if text is None:
+                try:
+                    channels = getattr(message, "channels", None) or getattr(message, "channel", None)
+                    if channels:
+                        if isinstance(channels, list):
+                            text = channels[0].alternatives[0].transcript
+                        else:
+                            text = channels.alternatives[0].transcript
+                except Exception:
+                    pass
 
-                # Debug: log full message structure if we couldn't extract text
-                if text is None:
-                    try:
-                        print(f"[DEEPGRAM] DEBUG TurnInfo attrs: {[a for a in dir(message) if not a.startswith('_')]}", flush=True)
-                        print(f"[DEEPGRAM] DEBUG TurnInfo repr: {message}", flush=True)
-                    except Exception:
-                        pass
+            # Path 3: turn_info nested object
+            if text is None:
+                try:
+                    turn_info = getattr(message, "turn_info", None)
+                    if turn_info:
+                        text = getattr(turn_info, "transcript", None)
+                except Exception:
+                    pass
 
-                if text and text.strip():
-                    final_transcript = text.strip()
-                    done.set()
+            # Path 4: data nested object
+            if text is None:
+                try:
+                    data = getattr(message, "data", None)
+                    if data:
+                        text = getattr(data, "transcript", None)
+                except Exception:
+                    pass
+
+            if text and text.strip():
+                final_transcript = text.strip()
+                print(f"[DEEPGRAM] Extracted transcript: {final_transcript}", flush=True)
+                done.set()
 
         def on_error(error):
             print(f"[DEEPGRAM] Error: {error}", flush=True)
