@@ -2144,7 +2144,11 @@ def _install_cloudflared():
 
 
 def _start_tunnel():
-    """Start cloudflared quick tunnel in background. Returns (success, url_or_error)."""
+    """Start cloudflared tunnel in background. Returns (success, url_or_error).
+
+    Uses a named tunnel if tunnel_name is configured (static URL),
+    otherwise falls back to a quick tunnel (random trycloudflare.com URL).
+    """
     global _tunnel_process, _tunnel_url
     with _tunnel_lock:
         # Already running?
@@ -2159,19 +2163,78 @@ def _start_tunnel():
             return False, 'cloudflared not installed'
 
         port = CONFIG['ACCESS'].get('webui_port', 80)
-        try:
-            proc = _sp.Popen(
-                [bin_path, 'tunnel', '--url', f'http://localhost:{port}'],
-                stdout=_sp.PIPE, stderr=_sp.PIPE, text=True
-            )
-        except Exception as e:
-            return False, str(e)
+        tunnel_name = CONFIG['ACCESS'].get('tunnel_name', '').strip()
 
-        # Read stderr lines until we find the URL (cloudflared prints it there)
-        url = None
-        url_pattern = re.compile(r'https://[a-zA-Z0-9-]+\.trycloudflare\.com')
-        import time
-        deadline = time.time() + 30
+        if tunnel_name:
+            return _start_named_tunnel(bin_path, port, tunnel_name)
+        else:
+            return _start_quick_tunnel(bin_path, port)
+
+
+def _start_named_tunnel(bin_path, port, tunnel_name):
+    """Start a named Cloudflare tunnel (static URL)."""
+    global _tunnel_process, _tunnel_url
+
+    # Resolve the static URL by querying the tunnel's DNS config
+    url = None
+    try:
+        r = _sp.run(
+            [bin_path, 'tunnel', 'info', tunnel_name],
+            capture_output=True, text=True, timeout=10
+        )
+        # Look for the CNAME hostname in the output
+        for line in (r.stdout + r.stderr).splitlines():
+            # Match lines like: "| <uuid>.cfargotunnel.com | CNAME | tars.myclosr.site |"
+            # or "Connector ... hostname=tars.myclosr.site"
+            hostname_match = re.search(r'([a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\s*\|?\s*$', line)
+            if hostname_match:
+                candidate = hostname_match.group(1)
+                # Skip the cfargotunnel.com internal hostname
+                if 'cfargotunnel.com' not in candidate:
+                    url = f'https://{candidate}'
+                    break
+    except Exception:
+        pass
+
+    # Fallback: try reading from tunnel route DNS
+    if not url:
+        try:
+            r = _sp.run(
+                [bin_path, 'tunnel', 'route', 'dns', tunnel_name, '--help'],
+                capture_output=True, text=True, timeout=5
+            )
+        except Exception:
+            pass
+        # If we still can't find it, the user must set it — use tunnel name as hint
+        if not url:
+            queue_message(f"INFO: Named tunnel '{tunnel_name}' — could not auto-detect hostname, check DNS config")
+
+    # Write a minimal config for the named tunnel to route traffic to the local port
+    import tempfile
+    config_content = f"url: http://localhost:{port}\n"
+    config_file = tempfile.NamedTemporaryFile(mode='w', suffix='.yml', prefix='cloudflared_', delete=False)
+    config_file.write(config_content)
+    config_file.close()
+
+    try:
+        proc = _sp.Popen(
+            [bin_path, 'tunnel', '--config', config_file.name, 'run', tunnel_name],
+            stdout=_sp.PIPE, stderr=_sp.PIPE, text=True
+        )
+    except Exception as e:
+        return False, str(e)
+
+    # Wait briefly for the process to start and verify it's running
+    import time
+    time.sleep(2)
+    if proc.poll() is not None:
+        stderr = proc.stderr.read()
+        return False, f'Named tunnel failed to start: {stderr}'
+
+    # If we couldn't auto-detect the URL, parse stderr for connection info
+    if not url:
+        url_pattern = re.compile(r'https://[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
+        deadline = time.time() + 15
         while time.time() < deadline:
             line = proc.stderr.readline()
             if not line:
@@ -2179,28 +2242,75 @@ def _start_tunnel():
                     break
                 continue
             match = url_pattern.search(line)
-            if match:
+            if match and 'cfargotunnel.com' not in match.group(0):
                 url = match.group(0)
                 break
 
-        if not url:
-            proc.kill()
-            return False, 'Could not get tunnel URL (cloudflared may have failed to start)'
+    if not url:
+        # Last resort: use the tunnel name as a hint
+        url = f'https://{tunnel_name} (check DNS)'
 
-        _tunnel_process = proc
-        _tunnel_url = url
+    _tunnel_process = proc
+    _tunnel_url = url
 
-        # Background thread to drain stderr so the process doesn't block
-        def _drain():
-            try:
-                for _ in proc.stderr:
-                    pass
-            except Exception:
+    def _drain():
+        try:
+            for _ in proc.stderr:
                 pass
-        threading.Thread(target=_drain, daemon=True).start()
+        except Exception:
+            pass
+    threading.Thread(target=_drain, daemon=True).start()
 
-        queue_message(f"SYSTEM: Remote access tunnel active: {url}")
-        return True, url
+    queue_message(f"SYSTEM: Named tunnel '{tunnel_name}' active: {url}")
+    return True, url
+
+
+def _start_quick_tunnel(bin_path, port):
+    """Start a cloudflared quick tunnel (random URL)."""
+    global _tunnel_process, _tunnel_url
+
+    try:
+        proc = _sp.Popen(
+            [bin_path, 'tunnel', '--url', f'http://localhost:{port}'],
+            stdout=_sp.PIPE, stderr=_sp.PIPE, text=True
+        )
+    except Exception as e:
+        return False, str(e)
+
+    # Read stderr lines until we find the URL (cloudflared prints it there)
+    url = None
+    url_pattern = re.compile(r'https://[a-zA-Z0-9-]+\.trycloudflare\.com')
+    import time
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        line = proc.stderr.readline()
+        if not line:
+            if proc.poll() is not None:
+                break
+            continue
+        match = url_pattern.search(line)
+        if match:
+            url = match.group(0)
+            break
+
+    if not url:
+        proc.kill()
+        return False, 'Could not get tunnel URL (cloudflared may have failed to start)'
+
+    _tunnel_process = proc
+    _tunnel_url = url
+
+    # Background thread to drain stderr so the process doesn't block
+    def _drain():
+        try:
+            for _ in proc.stderr:
+                pass
+        except Exception:
+            pass
+    threading.Thread(target=_drain, daemon=True).start()
+
+    queue_message(f"SYSTEM: Remote access tunnel active: {url}")
+    return True, url
 
 
 def _stop_tunnel_internal():

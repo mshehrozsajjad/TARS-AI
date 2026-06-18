@@ -225,6 +225,9 @@ webui_port = 80
 webui_password = tarspassword
 # Web UI color theme (auto-discovered from css/themes/ folder)
 webui_theme = default
+# Cloudflare named tunnel for static URL (leave empty for random quick-tunnel URL)
+# Setup: cloudflared tunnel login && cloudflared tunnel create <name> && cloudflared tunnel route dns <name> subdomain.yourdomain.com
+tunnel_name =
 
 [UI]
 # On-device display width in pixels (3.5" = 480, 5–7" = 800)
