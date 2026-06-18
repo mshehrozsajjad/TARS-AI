@@ -1027,32 +1027,37 @@ def train_face():
     frames_tried = 0
     max_attempts = num_samples * 3
 
+    import pygame as _pg
+
     while len(embeddings) < num_samples and frames_tried < max_attempts:
         frames_tried += 1
         try:
-            # Get frame via capture_bytes (same JPEG path as /camera_feed)
-            jpeg_bytes = camera.capture_bytes()
-            if jpeg_bytes is None:
+            # Get frame exactly how /camera_feed does it (that endpoint works)
+            frame = camera.get_frame()
+            if frame is None:
                 time.sleep(0.3)
                 continue
-            jpg_array = np.frombuffer(jpeg_bytes, dtype=np.uint8)
-            frame_bgr = cv2.imdecode(jpg_array, cv2.IMREAD_COLOR)
-            if frame_bgr is None:
-                time.sleep(0.3)
-                continue
-
-            # Debug: save first frame so we can check what YuNet sees
-            if frames_tried == 1:
-                debug_path = os.path.join(BASE_DIR, '..', 'vision', 'debug_face_train.jpg')
-                cv2.imwrite(debug_path, frame_bgr)
-                queue_message(f"FACE TRAIN: Debug frame saved ({frame_bgr.shape[1]}x{frame_bgr.shape[0]})")
+            frame_array = _pg.surfarray.array3d(frame)
+            frame_array = np.transpose(frame_array, (1, 0, 2))
+            frame_array = np.ascontiguousarray(frame_array)
+            frame_bgr = cv2.cvtColor(frame_array, cv2.COLOR_RGB2BGR)
 
             h, w = frame_bgr.shape[:2]
+
+            # Debug: save first frame and log dimensions
+            if frames_tried == 1:
+                debug_dir = os.path.join(os.path.dirname(BASE_DIR), 'vision')
+                os.makedirs(debug_dir, exist_ok=True)
+                debug_path = os.path.join(debug_dir, 'debug_face_train.jpg')
+                cv2.imwrite(debug_path, frame_bgr)
+                queue_message(f"FACE TRAIN: Debug frame saved to {debug_path} ({w}x{h})")
+
             detector.setInputSize((w, h))
             _, faces = detector.detect(frame_bgr)
 
-            if faces is None or len(faces) == 0:
-                if frames_tried <= 3:
+            num_faces = len(faces) if faces is not None else 0
+            if num_faces == 0:
+                if frames_tried <= 5:
                     queue_message(f"FACE TRAIN: No face in frame {frames_tried} ({w}x{h})")
                 time.sleep(0.2)
                 continue
@@ -1064,8 +1069,9 @@ def train_face():
             embeddings.append(embedding.copy())
             queue_message(f"FACE TRAIN: Sample {len(embeddings)}/{num_samples}")
 
-            time.sleep(0.15)  # brief pause between captures
-        except Exception:
+            time.sleep(0.15)
+        except Exception as e:
+            queue_message(f"FACE TRAIN: Error in frame {frames_tried}: {e}")
             time.sleep(0.2)
             continue
 
