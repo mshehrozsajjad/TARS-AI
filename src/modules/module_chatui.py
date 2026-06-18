@@ -969,6 +969,8 @@ def awareness_status():
         return jsonify({
             "status": "running",
             "enabled": am._enabled,
+            "face_mode": am._face_mode,
+            "server_url": am._server_url,
             "present_people": am.get_present_people(),
             "scene_description": am.get_scene_description(),
             "awareness_context": am.get_awareness_context(),

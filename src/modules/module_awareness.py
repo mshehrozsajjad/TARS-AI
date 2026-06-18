@@ -318,8 +318,10 @@ class AwarenessManager:
         self._quiet_start = int(drives_cfg.get("quiet_start", 23))
         self._quiet_end = int(drives_cfg.get("quiet_end", 7))
 
-        if self._enabled and self._face_mode == "local":
-            self._face_recognizer = HeadlessFaceRecognizer()
+        if self._enabled:
+            queue_message(f"AWARENESS: Face mode={self._face_mode}, server_url={self._server_url}")
+            if self._face_mode == "local":
+                self._face_recognizer = HeadlessFaceRecognizer()
 
     def start(self):
         """Start the background awareness thread."""
