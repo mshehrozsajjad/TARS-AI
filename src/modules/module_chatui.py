@@ -958,6 +958,27 @@ def camera_feed():
     return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 
+@flask_app.route('/api/awareness', methods=['GET'])
+def awareness_status():
+    """Debug endpoint — check awareness system state."""
+    try:
+        from modules.module_awareness import get_awareness_manager
+        am = get_awareness_manager()
+        if am is None:
+            return jsonify({"status": "not running", "reason": "AwarenessManager singleton is None"})
+        return jsonify({
+            "status": "running",
+            "enabled": am._enabled,
+            "present_people": am.get_present_people(),
+            "scene_description": am.get_scene_description(),
+            "awareness_context": am.get_awareness_context(),
+            "face_recognizer_loaded": am._face_recognizer is not None,
+            "known_faces": am._face_recognizer.known_names if am._face_recognizer else [],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @flask_app.route('/api/faces', methods=['GET'])
 def list_faces():
     """List all enrolled faces."""
