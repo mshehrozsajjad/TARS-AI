@@ -1028,6 +1028,7 @@ def train_face():
     max_attempts = num_samples * 3
 
     import pygame as _pg
+    import numpy as np
 
     while len(embeddings) < num_samples and frames_tried < max_attempts:
         frames_tried += 1
