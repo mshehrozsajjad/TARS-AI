@@ -256,23 +256,31 @@ def _prepare_request_data(llm_backend, prompt, image_b64=None):
         url = f"{CONFIG['LLM']['base_url']}/v1/chat/completions"
         model = CONFIG['LLM']['other_model']
 
+    # GPT-5 series are reasoning models that reject temperature and top_p
+    # (only default value of 1 is accepted). Detect by model name prefix.
+    _is_reasoning = model.startswith(("gpt-5", "o1", "o3", "o4"))
+
     data = {
         "model": model,
         "messages": [
             {"role": "system", "content": CONFIG['LLM']['systemprompt']},
             {"role": "user", "content": user_content}
         ],
-        "max_tokens": CONFIG['LLM']['max_tokens'],
-        "temperature": CONFIG['LLM']['temperature'],
-        "top_p": CONFIG['LLM']['top_p'],
         "stream": True
     }
+
+    if _is_reasoning:
+        data["max_completion_tokens"] = CONFIG['LLM']['max_tokens']
+    else:
+        data["max_tokens"] = CONFIG['LLM']['max_tokens']
+        data["temperature"] = CONFIG['LLM']['temperature']
+        data["top_p"] = CONFIG['LLM']['top_p']
 
     if llm_backend in ["openai", "grok", "deepinfra", "gemini"]:
         data["response_format"] = {"type": "json_object"}
     else:
         if CONFIG['LLM'].get('json_mode', True):
-            data["response_format"] = {"type": "json_object"}  
+            data["response_format"] = {"type": "json_object"}
 
     return url, data
 
