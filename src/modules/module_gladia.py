@@ -71,7 +71,7 @@ def transcribe_streaming(stt_manager):
     # in the background, and buffers any audio sent before ready.
     session = live.start_session(
         LiveV2InitRequest(
-            model="solaria-3",
+            model="solaria-1",
             encoding="wav/pcm",
             sample_rate=16000,
             bit_depth=16,
