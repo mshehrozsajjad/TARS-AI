@@ -592,6 +592,21 @@ def load_config():
             "vad_prefix_ms": config.getint('GEMINI_LIVE', 'vad_prefix_ms', fallback=200),
             "context_trigger_tokens": config.getint('GEMINI_LIVE', 'context_trigger_tokens', fallback=32000),
         },
+        "DRIVES": {
+            "enabled": config.get('DRIVES', 'enabled', fallback='false'),
+            "tick_interval": config.get('DRIVES', 'tick_interval', fallback='60'),
+            "proactive_speech": config.get('DRIVES', 'proactive_speech', fallback='true'),
+            "quiet_start": config.get('DRIVES', 'quiet_start', fallback='23'),
+            "quiet_end": config.get('DRIVES', 'quiet_end', fallback='7'),
+        },
+        "AWARENESS": {
+            "enabled": config.get('AWARENESS', 'enabled', fallback='false'),
+            "face_interval": config.get('AWARENESS', 'face_interval', fallback='3'),
+            "scene_interval": config.get('AWARENESS', 'scene_interval', fallback='60'),
+            "server_url": config.get('AWARENESS', 'server_url', fallback=''),
+            "proactive_greetings": config.get('AWARENESS', 'proactive_greetings', fallback='true'),
+            "departure_timeout": config.get('AWARENESS', 'departure_timeout', fallback='30'),
+        },
     }
 
     config_dict = apply_device_overrides(config_dict, capabilities)
