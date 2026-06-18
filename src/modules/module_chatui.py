@@ -957,6 +957,151 @@ def camera_feed():
     from flask import Response
     return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
+
+@flask_app.route('/api/faces', methods=['GET'])
+def list_faces():
+    """List all enrolled faces."""
+    try:
+        from modules.module_awareness import HeadlessFaceRecognizer
+        recognizer = HeadlessFaceRecognizer()
+        return jsonify({"faces": recognizer.known_names})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@flask_app.route('/api/faces/train', methods=['POST'])
+def train_face():
+    """Enroll a face by capturing frames from the live camera.
+
+    POST /api/faces/train with JSON body: {"name": "Cooper", "samples": 10}
+    Captures N frames from the camera, detects the largest face in each,
+    averages the embeddings, and saves to known_faces.npz.
+    """
+    data = request.get_json()
+    if not data or not data.get('name'):
+        return jsonify({"error": "name is required"}), 400
+
+    name = data['name'].strip()
+    num_samples = int(data.get('samples', 10))
+
+    try:
+        import cv2
+        from modules.module_awareness import HeadlessFaceRecognizer, _FACES_DIR, _DB_FILE
+    except ImportError as e:
+        return jsonify({"error": f"Missing dependency: {e}"}), 500
+
+    # Get camera
+    camera = None
+    try:
+        from UI.module_ui_camera import CameraModule
+        camera = CameraModule(640, 480)
+    except Exception:
+        pass
+
+    if camera is None:
+        try:
+            from picamera2 import Picamera2
+            _cam = Picamera2()
+            _cam.configure(_cam.create_still_configuration(main={"size": (640, 480), "format": "RGB888"}))
+            _cam.start()
+            camera = _cam
+        except Exception as e:
+            return jsonify({"error": f"Camera not available: {e}"}), 503
+
+    recognizer = HeadlessFaceRecognizer()
+    embeddings = []
+    frames_tried = 0
+    max_attempts = num_samples * 3  # allow some failed frames
+
+    import pygame as _pg
+
+    while len(embeddings) < num_samples and frames_tried < max_attempts:
+        frames_tried += 1
+        try:
+            # Capture frame
+            if hasattr(camera, 'get_frame'):
+                frame = camera.get_frame()
+                if frame is None:
+                    time.sleep(0.2)
+                    continue
+                frame_array = _pg.surfarray.array3d(frame)
+                frame_array = np.transpose(frame_array, (1, 0, 2))
+                frame_array = np.ascontiguousarray(frame_array)
+                frame_bgr = cv2.cvtColor(frame_array, cv2.COLOR_RGB2BGR)
+            else:
+                # picamera2 direct
+                rgb = camera.capture_array()
+                frame_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+            h, w = frame_bgr.shape[:2]
+            recognizer.detector.setInputSize((w, h))
+            _, faces = recognizer.detector.detect(frame_bgr)
+
+            if faces is None or len(faces) == 0:
+                time.sleep(0.2)
+                continue
+
+            # Use the largest face
+            largest = max(faces, key=lambda f: f[2] * f[3])
+            aligned = recognizer.recognizer.alignCrop(frame_bgr, largest)
+            embedding = recognizer.recognizer.feature(aligned)
+            embeddings.append(embedding.copy())
+
+            time.sleep(0.15)  # brief pause between captures
+        except Exception:
+            time.sleep(0.2)
+            continue
+
+    if len(embeddings) < 3:
+        return jsonify({"error": f"Only captured {len(embeddings)} face samples (need at least 3). Make sure a face is clearly visible."}), 400
+
+    # Average and normalize
+    avg_embedding = np.mean(embeddings, axis=0)
+    avg_embedding = avg_embedding / np.linalg.norm(avg_embedding)
+
+    # Save to database
+    _FACES_DIR.mkdir(parents=True, exist_ok=True)
+    if name in recognizer.known_names:
+        idx = recognizer.known_names.index(name)
+        recognizer.known_embeddings[idx] = avg_embedding
+    else:
+        recognizer.known_names.append(name)
+        recognizer.known_embeddings.append(avg_embedding)
+
+    save_dict = {'names': np.array(recognizer.known_names, dtype=object)}
+    for i, emb in enumerate(recognizer.known_embeddings):
+        save_dict[f'emb_{i}'] = emb
+    np.savez(str(_DB_FILE), **save_dict)
+
+    queue_message(f"FACE: Enrolled '{name}' ({len(embeddings)} samples)")
+    return jsonify({"status": "ok", "name": name, "samples": len(embeddings)})
+
+
+@flask_app.route('/api/faces/<name>', methods=['DELETE'])
+def delete_face(name):
+    """Delete an enrolled face."""
+    try:
+        from modules.module_awareness import HeadlessFaceRecognizer, _FACES_DIR, _DB_FILE
+        recognizer = HeadlessFaceRecognizer()
+
+        if name not in recognizer.known_names:
+            return jsonify({"error": f"Face '{name}' not found"}), 404
+
+        idx = recognizer.known_names.index(name)
+        recognizer.known_names.pop(idx)
+        recognizer.known_embeddings.pop(idx)
+
+        _FACES_DIR.mkdir(parents=True, exist_ok=True)
+        save_dict = {'names': np.array(recognizer.known_names, dtype=object)}
+        for i, emb in enumerate(recognizer.known_embeddings):
+            save_dict[f'emb_{i}'] = emb
+        np.savez(str(_DB_FILE), **save_dict)
+
+        queue_message(f"FACE: Deleted '{name}'")
+        return jsonify({"status": "ok", "deleted": name})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @flask_app.route('/audio_stream')
 def audio_stream():
     """
