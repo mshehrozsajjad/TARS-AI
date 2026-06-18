@@ -750,13 +750,13 @@ Current Time: {now.strftime('%H:%M:%S')}
             awareness_ctx = am.get_awareness_context()
             if awareness_ctx:
                 base_prompt += f"\n{awareness_ctx}"
-                queue_message(f"DEBUG PROMPT: Awareness injected: {awareness_ctx[:100]}")
+                queue_message(f"AWARENESS PROMPT: {awareness_ctx[:120]}")
             else:
-                queue_message("DEBUG PROMPT: Awareness manager active but context is empty")
+                queue_message("AWARENESS PROMPT: context is empty (no one present, no scene)")
         else:
-            queue_message("DEBUG PROMPT: Awareness manager is None")
+            queue_message("AWARENESS PROMPT: manager is None")
     except Exception as e:
-        queue_message(f"DEBUG PROMPT: Awareness injection failed: {e}")
+        queue_message(f"AWARENESS PROMPT: injection failed: {e}")
 
     # Memory retrieval (long-term + short-term + examples)
     speed.start('memory')
