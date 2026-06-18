@@ -994,34 +994,47 @@ def train_face():
     try:
         from UI.module_ui_camera import CameraModule
         camera = CameraModule(640, 480)  # singleton — returns the existing instance
-        if not camera.running:
-            return jsonify({"error": "Camera is not running"}), 503
+        queue_message(f"FACE TRAIN: Camera singleton running={camera.running}, frame={'yes' if camera._frame else 'no'}")
     except Exception as e:
         return jsonify({"error": f"Camera not available: {e}"}), 503
 
-    recognizer = HeadlessFaceRecognizer()
+    # Create face detector/recognizer directly (avoid HeadlessFaceRecognizer overhead)
+    from modules.module_awareness import _ensure_models, _MODELS_DIR, _FACES_DIR, _DB_FILE
+    _ensure_models()
+    yunet_path = str(_MODELS_DIR / "face_detection_yunet_2023mar.onnx")
+    sface_path = str(_MODELS_DIR / "face_recognition_sface_2021dec.onnx")
+    detector = cv2.FaceDetectorYN.create(yunet_path, "", (320, 320))
+    recognizer_sf = cv2.FaceRecognizerSF.create(sface_path, "")
+
+    # Load existing database
+    known_names = []
+    known_embeddings = []
+    if _DB_FILE.exists():
+        fdata = np.load(str(_DB_FILE), allow_pickle=True)
+        known_names = fdata['names'].tolist()
+        known_embeddings = [fdata[f'emb_{i}'] for i in range(len(known_names))]
+
     embeddings = []
     frames_tried = 0
-    max_attempts = num_samples * 3  # allow some failed frames
+    max_attempts = num_samples * 3
 
     while len(embeddings) < num_samples and frames_tried < max_attempts:
         frames_tried += 1
         try:
-            # Capture JPEG bytes from camera (no pygame dependency)
-            jpeg_bytes = camera.capture_bytes()
-            if jpeg_bytes is None:
-                time.sleep(0.2)
+            # Get frame from the camera feed (same path as /camera_feed that works)
+            import pygame as _pg
+            frame = camera.get_frame()
+            if frame is None:
+                time.sleep(0.3)
                 continue
-            # Decode JPEG to BGR numpy array
-            jpg_array = np.frombuffer(jpeg_bytes, dtype=np.uint8)
-            frame_bgr = cv2.imdecode(jpg_array, cv2.IMREAD_COLOR)
-            if frame_bgr is None:
-                time.sleep(0.2)
-                continue
+            frame_array = _pg.surfarray.array3d(frame)
+            frame_array = np.transpose(frame_array, (1, 0, 2))
+            frame_array = np.ascontiguousarray(frame_array)
+            frame_bgr = cv2.cvtColor(frame_array, cv2.COLOR_RGB2BGR)
 
             h, w = frame_bgr.shape[:2]
-            recognizer.detector.setInputSize((w, h))
-            _, faces = recognizer.detector.detect(frame_bgr)
+            detector.setInputSize((w, h))
+            _, faces = detector.detect(frame_bgr)
 
             if faces is None or len(faces) == 0:
                 time.sleep(0.2)
@@ -1029,9 +1042,10 @@ def train_face():
 
             # Use the largest face
             largest = max(faces, key=lambda f: f[2] * f[3])
-            aligned = recognizer.recognizer.alignCrop(frame_bgr, largest)
-            embedding = recognizer.recognizer.feature(aligned)
+            aligned = recognizer_sf.alignCrop(frame_bgr, largest)
+            embedding = recognizer_sf.feature(aligned)
             embeddings.append(embedding.copy())
+            queue_message(f"FACE TRAIN: Sample {len(embeddings)}/{num_samples}")
 
             time.sleep(0.15)  # brief pause between captures
         except Exception:
@@ -1047,15 +1061,15 @@ def train_face():
 
     # Save to database
     _FACES_DIR.mkdir(parents=True, exist_ok=True)
-    if name in recognizer.known_names:
-        idx = recognizer.known_names.index(name)
-        recognizer.known_embeddings[idx] = avg_embedding
+    if name in known_names:
+        idx = known_names.index(name)
+        known_embeddings[idx] = avg_embedding
     else:
-        recognizer.known_names.append(name)
-        recognizer.known_embeddings.append(avg_embedding)
+        known_names.append(name)
+        known_embeddings.append(avg_embedding)
 
-    save_dict = {'names': np.array(recognizer.known_names, dtype=object)}
-    for i, emb in enumerate(recognizer.known_embeddings):
+    save_dict = {'names': np.array(known_names, dtype=object)}
+    for i, emb in enumerate(known_embeddings):
         save_dict[f'emb_{i}'] = emb
     np.savez(str(_DB_FILE), **save_dict)
 
