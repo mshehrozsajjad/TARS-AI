@@ -7,6 +7,10 @@ end-of-speech detection. Audio is sent as the user speaks, so the
 transcript is ready almost instantly after send_close_stream() is called.
 
 DeepgramClient is reused across sessions to avoid re-initialization.
+
+NOTE: The sync SDK's start_listening() blocks (enters a receive loop),
+so we run it in a background daemon thread to keep the main thread
+free for the recording loop.
 """
 
 import os
@@ -20,47 +24,27 @@ _client = None
 
 
 def _extract_transcript(message):
-    """Extract transcript text from a Deepgram v2 message (dict or object)."""
-    # Messages arrive as plain dicts from the SDK
-    if isinstance(message, dict):
-        msg_type = message.get("type", "")
+    """Extract transcript text from a Deepgram v2 message (plain dict)."""
+    if not isinstance(message, dict):
+        # Fallback for SDK objects
+        return getattr(message, "transcript", None)
 
-        # v2 TurnInfo: {"type": "TurnInfo", "transcript": "...", ...}
-        if "transcript" in message:
-            return message["transcript"]
+    # Direct transcript field
+    if "transcript" in message:
+        return message["transcript"]
 
-        # v2 nested channel structure
-        if "channel" in message:
-            try:
-                return message["channel"]["alternatives"][0]["transcript"]
-            except (KeyError, IndexError, TypeError):
-                pass
+    # Nested channel structure
+    if "channel" in message:
+        try:
+            return message["channel"]["alternatives"][0]["transcript"]
+        except (KeyError, IndexError, TypeError):
+            pass
 
-        # v2 turn_info wrapper
-        if "turn_info" in message:
-            ti = message["turn_info"]
-            if isinstance(ti, dict) and "transcript" in ti:
-                return ti["transcript"]
-
-        # v2 data wrapper
-        if "data" in message:
-            d = message["data"]
-            if isinstance(d, dict) and "transcript" in d:
-                return d["transcript"]
-
-        return None
-
-    # Fallback: SDK object with attributes
-    text = getattr(message, "transcript", None)
-    if text is not None:
-        return text
-
-    try:
-        channel = getattr(message, "channel", None)
-        if channel:
-            return channel.alternatives[0].transcript
-    except Exception:
-        pass
+    # turn_info wrapper
+    if "turn_info" in message:
+        ti = message["turn_info"]
+        if isinstance(ti, dict) and "transcript" in ti:
+            return ti["transcript"]
 
     return None
 
@@ -112,14 +96,14 @@ def transcribe_streaming(stt_manager):
         def on_message(message):
             nonlocal final_transcript
             msg_type = message.get("type", "Unknown") if isinstance(message, dict) else getattr(message, "type", "Unknown")
-            print(f"[DEEPGRAM] Message: type={msg_type}", flush=True)
 
-            # Skip connection/metadata messages
+            # Skip non-transcript messages
             if msg_type in ("Connected", "Metadata"):
+                print(f"[DEEPGRAM] {msg_type}", flush=True)
                 return
 
-            # Debug: log full message for non-trivial types
-            print(f"[DEEPGRAM] DEBUG payload: {message}", flush=True)
+            # Debug: log transcript-bearing messages
+            print(f"[DEEPGRAM] Message type={msg_type}: {message}", flush=True)
 
             text = _extract_transcript(message)
             if text and text.strip():
@@ -135,7 +119,11 @@ def transcribe_streaming(stt_manager):
         connection.on(EventType.ERROR, on_error)
         connection.on(EventType.CLOSE, lambda _: done.set())
 
-        connection.start_listening()
+        # start_listening() blocks in the sync SDK (enters a receive loop),
+        # so run it in a background thread to keep the main thread free
+        # for the recording loop.
+        listener = threading.Thread(target=connection.start_listening, daemon=True)
+        listener.start()
 
         # Get VAD function from STT manager
         vad_dispatch = {
@@ -176,7 +164,7 @@ def transcribe_streaming(stt_manager):
                 # Abort if TTS started
                 if is_tts_playing():
                     set_tars_state(TarsState.STANDBY)
-                    print("[DEEPGRAM] Aborting — TTS started playing", flush=True)
+                    print("[DEEPGRAM] Aborting — TTS started", flush=True)
                     connection.send_close_stream()
                     done.wait(timeout=2)
                     return None
@@ -195,7 +183,7 @@ def transcribe_streaming(stt_manager):
                 except Exception:
                     pass
                 if not detected_speech and silent_frames >= max_silent_pre_speech and not _gesture_running:
-                    print(f"[DEEPGRAM] No speech detected after {frame_idx+1} frames, giving up", flush=True)
+                    print(f"[DEEPGRAM] No speech after {frame_idx+1} frames, giving up", flush=True)
                     break
 
                 if is_silence and detected_speech and speech_frames >= min_speech_frames:
