@@ -136,8 +136,6 @@ def utterance_callback(message):
             return
 
         user_text = message_dict['text'].strip()
-        _user_display = CONFIG['CHAR'].get('user_name', 'User')
-        queue_message(f"[{_user_display}] {user_text}")
 
         # Kick off memory embedding in background so it's ready by prompt-build time
         if memory_manager and memory_manager.long_mem_use and hasattr(memory_manager, 'prefetch_embedding'):
@@ -147,9 +145,9 @@ def utterance_callback(message):
         # defer the blocking wait to build_prompt (right before speaker context),
         # giving the background observer maximum time to finish identification.
         _sid_start = time.perf_counter()
-        # Use last known named speaker for immediate UI display while the
-        # current utterance's speaker ID is still processing in the background.
+        # Resolve display name: voice last-known > face recognition > config fallback
         _speaker_display = CONFIG['CHAR'].get('user_name', 'User')
+        _voice_resolved = False
         try:
             from modules.module_speaker_id import get_speaker_id_manager
             _sid_mgr = get_speaker_id_manager()
@@ -157,8 +155,23 @@ def utterance_callback(message):
                 _last = _sid_mgr.get_last_named_speaker()
                 if _last:
                     _speaker_display = _last
+                    _voice_resolved = True
         except Exception:
             pass
+        # Face recognition fallback — only if voice has no known speaker
+        if not _voice_resolved:
+            try:
+                from modules.module_identity import get_identity_manager
+                _im = get_identity_manager()
+                if _im is not None:
+                    _faces = _im.get_recognized_faces()
+                    _known = [f for f in _faces if f.get("name") not in (None, "", "UNKNOWN")]
+                    if len(_known) == 1:
+                        _speaker_display = _known[0]["name"]
+            except Exception:
+                pass
+
+        queue_message(f"[{_speaker_display}] {user_text}")
 
         if ui_manager:
             ui_manager.update_data(_speaker_display, user_text, _speaker_display)
