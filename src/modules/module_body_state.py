@@ -285,14 +285,14 @@ class BodyStateManager:
 
     # Mood → motion mapping: (speed_factor, amplitude_factor, fidget_interval_s)
     _MOTION_PARAMS = {
-        "joy":       (1.3, 1.2, 25),
-        "curiosity": (1.0, 1.0, 35),
-        "neutral":   (0.9, 0.8, 50),
-        "sadness":   (0.5, 0.4, 80),
-        "anger":     (1.2, 1.1, 30),
-        "fear":      (0.6, 0.5, 70),
-        "love":      (0.8, 0.9, 40),
-        "surprise":  (1.1, 1.1, 30),
+        "joy":       (1.3, 1.2, 120),
+        "curiosity": (1.0, 1.0, 180),
+        "neutral":   (0.9, 0.8, 240),
+        "sadness":   (0.5, 0.6, 360),
+        "anger":     (1.2, 1.1, 150),
+        "fear":      (0.6, 0.7, 300),
+        "love":      (0.8, 0.9, 200),
+        "surprise":  (1.1, 1.1, 150),
     }
 
     def get_motion_params(self) -> tuple:
