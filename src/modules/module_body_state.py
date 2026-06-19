@@ -281,6 +281,37 @@ class BodyStateManager:
 
         return "[" + " · ".join(parts) + "]"
 
+    # ── Motion parameters (mood → speed / amplitude / fidget rate) ─────
+
+    # Mood → motion mapping: (speed_factor, amplitude_factor, fidget_interval_s)
+    _MOTION_PARAMS = {
+        "joy":       (1.3, 1.2, 25),
+        "curiosity": (1.0, 1.0, 35),
+        "neutral":   (0.9, 0.8, 50),
+        "sadness":   (0.5, 0.4, 80),
+        "anger":     (1.2, 1.1, 30),
+        "fear":      (0.6, 0.5, 70),
+        "love":      (0.8, 0.9, 40),
+        "surprise":  (1.1, 1.1, 30),
+    }
+
+    def get_motion_params(self) -> tuple:
+        """Return (speed, amplitude, fidget_interval) based on current mood.
+
+        speed: 0.3–1.5 — multiplier for servo speed_factor
+        amplitude: 0.3–1.5 — scales gesture range of motion
+        fidget_interval: seconds between idle fidgets
+        """
+        s = self.snapshot()
+
+        # Low energy overrides mood — fatigue dominates motion
+        energy = s.drives.get("energy", 100)
+        if energy < 30:
+            return (0.5, 0.4, 90)
+
+        params = self._MOTION_PARAMS.get(s.dominant_emotion, (0.9, 0.8, 50))
+        return params
+
     # ── Trait modifiers (unified emotion + drive) ────────────────────────
 
     def get_trait_modifiers(self) -> dict:

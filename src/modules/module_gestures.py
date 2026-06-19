@@ -1,86 +1,88 @@
 """
 module_gestures.py
 
-Conversational gesture layer for TARS-AI.
+Mood-modulated gesture layer for TARS-AI.
 
-Maps expressive gesture names to existing movement functions in
-module_movements.py. The LLM picks a gesture via the optional
-"gesture" field in its JSON response — this module executes it
-in a background thread so it runs parallel to TTS playback.
+Maps 8 core conversational gestures to simple parameterized movement
+functions.  Mood (from BodyStateManager) controls speed and amplitude —
+a sad TARS moves slowly with minimal range, an excited TARS is fast
+and exaggerated.
 
-All movements are the proven, hardware-tested functions from
-module_movements.py. This module is just the naming/dispatch layer.
+Also provides an idle fidget system that runs on body-autopilot:
+tiny weight shifts and sways during STANDBY, frequency set by mood.
+No LLM involvement — part of the subconscious body layer.
 """
 
+import random
 import threading
+import time
 
 from modules.module_messageQue import queue_message
 from modules.module_movements import (
-    bow,
-    tilt_right,
-    tilt_left,
-    side_side,
-    laugh,
-    excited,
-    swing_legs,
-    wave_right,
-    wave_left,
-    pose,
-    neutral_legs,
-    right_hi,
-    left_hi,
+    simple_nod,
+    simple_lean,
+    simple_recoil,
+    simple_rock,
+    simple_bounce,
+    simple_shrug,
+    simple_wave,
+    simple_settle,
+    fidget_weight_shift,
+    fidget_settle,
+    fidget_rock,
 )
 
 
-# ---------------------------------------------------------------------------
-# Gesture registry — maps conversational names to movement functions
-# ---------------------------------------------------------------------------
+# ── Gesture registry ─────────────────────────────────────────────────────────
 
 GESTURES = {
-    "nod":             {"fn": bow,           "desc": "Agreement, acknowledgment"},
-    "lean_in":         {"fn": tilt_right,    "desc": "Curiosity, leaning in with interest"},
-    "recoil":          {"fn": tilt_left,     "desc": "Surprise, leaning back in shock"},
-    "tilt_curious":    {"fn": tilt_left,     "desc": "Thinking, pondering"},
-    "shake_no":        {"fn": side_side,     "desc": "Disagreement, disbelief"},
-    "excited_bounce":  {"fn": excited,       "desc": "Joy, excitement"},
-    "laugh":           {"fn": laugh,         "desc": "Amusement, laughter"},
-    "droop":           {"fn": swing_legs,    "desc": "Sadness, restless disappointment"},
-    "puff_up":         {"fn": pose,          "desc": "Confidence, pride, standing tall"},
-    "shrug":           {"fn": side_side,     "desc": "Uncertainty, 'who knows'"},
-    "scan":            {"fn": side_side,     "desc": "Looking around, surveying"},
-    "wave":            {"fn": wave_right,    "desc": "Greeting, waving hello"},
-    "celebrate":       {"fn": excited,       "desc": "Celebration, big excitement"},
-    "hi_right":        {"fn": right_hi,      "desc": "Raising right side in greeting"},
-    "hi_left":         {"fn": left_hi,       "desc": "Raising left side in greeting"},
-    "bow":             {"fn": bow,           "desc": "Respectful bow, gratitude, thank you"},
+    "nod":     {"fn": simple_nod,     "desc": "Agreement, acknowledgment"},
+    "lean":    {"fn": simple_lean,    "desc": "Curiosity, leaning in with interest"},
+    "recoil":  {"fn": simple_recoil,  "desc": "Surprise, shock, disbelief"},
+    "rock":    {"fn": simple_rock,    "desc": "Disagreement, thinking, 'no way'"},
+    "bounce":  {"fn": simple_bounce,  "desc": "Joy, excitement, laughter"},
+    "shrug":   {"fn": simple_shrug,   "desc": "Uncertainty, 'who knows'"},
+    "wave":    {"fn": simple_wave,    "desc": "Greeting, hello/goodbye"},
+    "settle":  {"fn": simple_settle,  "desc": "Calm acceptance, respect, gratitude"},
 }
 
 GESTURE_NAMES = sorted(GESTURES.keys())
 
+_FIDGETS = [fidget_weight_shift, fidget_settle, fidget_rock]
+
 # Thread lock — only one gesture at a time
 _gesture_lock = threading.Lock()
 
+# Flag: True while a gesture is physically running (checked by STT)
+gesture_active = False
+
+
+def _get_mood_params():
+    """Get (speed, amplitude, fidget_interval) from body state, with defaults."""
+    try:
+        from modules.module_body_state import get_body_state_manager
+        bsm = get_body_state_manager()
+        if bsm is not None:
+            return bsm.get_motion_params()
+    except Exception:
+        pass
+    return (0.9, 0.8, 50)  # neutral defaults
+
+
+# ── Gesture execution ─────────────────────────────────────────────────────────
 
 def execute_gesture(name):
-    """Execute a gesture by name. Blocks until complete.
+    """Execute a gesture by name with mood-modulated speed/amplitude.
 
-    Temporarily disables the movement start/end callbacks so the gesture
-    does NOT pause STT or UI. This is critical — gestures run during or
-    right after speech, and pausing STT would cause the conversation to
-    drop into sleep mode.
+    Blocks until complete. Temporarily disables movement callbacks so the
+    gesture does NOT pause STT or UI.
 
-    Skips silently if:
-      - Another gesture is already running
-      - The gesture name is unknown
-      - PCA9685 is not initialized
-
-    Args:
-        name: Gesture name from GESTURES registry.
+    Skips silently if another gesture is running or name is unknown.
     """
+    global gesture_active
     if not name:
         return
 
-    # Don't stack gestures
     if not _gesture_lock.acquire(blocking=False):
         return
 
@@ -98,24 +100,23 @@ def execute_gesture(name):
     servoctl._on_movement_start = None
     servoctl._on_movement_end = None
 
+    speed, amplitude, _ = _get_mood_params()
+
     try:
-        queue_message(f"GESTURE: {name}")
-        gesture["fn"]()
+        gesture_active = True
+        queue_message(f"GESTURE: {name} (speed={speed:.1f}, amp={amplitude:.1f})")
+        gesture["fn"](speed=speed, amplitude=amplitude)
     except Exception as e:
         queue_message(f"WARNING: Gesture '{name}' failed: {e}")
     finally:
-        # Restore original callbacks
+        gesture_active = False
         servoctl._on_movement_start = old_start
         servoctl._on_movement_end = old_end
         _gesture_lock.release()
 
 
 def execute_gesture_async(name):
-    """Fire a gesture in a background thread. Returns immediately.
-
-    This is the primary entry point — called from module_main.py
-    when TTS starts playing to gesture in parallel with speech.
-    """
+    """Fire a gesture in a background thread. Returns immediately."""
     if not name or name not in GESTURES:
         return
     thread = threading.Thread(
@@ -126,3 +127,57 @@ def execute_gesture_async(name):
     )
     thread.start()
     return thread
+
+
+# ── Idle fidget system (body-autopilot) ───────────────────────────────────────
+
+_fidget_stop = threading.Event()
+_fidget_thread = None
+
+
+def _fidget_loop():
+    """Background loop that plays subtle idle fidgets at mood-driven intervals."""
+    queue_message("GESTURES: Idle fidgets started")
+    while not _fidget_stop.is_set():
+        _, amplitude, interval = _get_mood_params()
+
+        # Wait for the mood-driven interval (interruptible)
+        if _fidget_stop.wait(timeout=interval):
+            break
+
+        # Only fidget in STANDBY (not during conversation or TTS)
+        try:
+            from modules.module_state import get_tars_state, TarsState
+            if get_tars_state() != TarsState.STANDBY:
+                continue
+        except Exception:
+            continue
+
+        # Skip if a gesture is already running
+        if not _gesture_lock.acquire(blocking=False):
+            continue
+
+        try:
+            fn = random.choice(_FIDGETS)
+            fn(amplitude=amplitude)
+        except Exception:
+            pass
+        finally:
+            _gesture_lock.release()
+
+    queue_message("GESTURES: Idle fidgets stopped")
+
+
+def start_idle_fidgets():
+    """Start the idle fidget background loop."""
+    global _fidget_thread
+    if _fidget_thread is not None and _fidget_thread.is_alive():
+        return
+    _fidget_stop.clear()
+    _fidget_thread = threading.Thread(target=_fidget_loop, daemon=True, name="idle-fidgets")
+    _fidget_thread.start()
+
+
+def stop_idle_fidgets():
+    """Stop the idle fidget background loop."""
+    _fidget_stop.set()

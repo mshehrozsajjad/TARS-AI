@@ -447,6 +447,13 @@ if __name__ == "__main__":
         stt_manager.start()
         set_tars_state(TarsState.STANDBY)
 
+        # Start idle fidgets (body-autopilot layer)
+        try:
+            from modules.module_gestures import start_idle_fidgets
+            start_idle_fidgets()
+        except Exception as e:
+            queue_message(f"WARNING: Idle fidgets not available: {e}")
+
         while not shutdown_event.is_set():
             time.sleep(0.1)
 
