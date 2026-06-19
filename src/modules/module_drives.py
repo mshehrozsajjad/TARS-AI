@@ -97,11 +97,12 @@ class DrivesManager:
     # Cooldown between proactive speech of same type (seconds)
     PROACTIVE_COOLDOWN = 1800  # 30 minutes
 
-    def __init__(self, config, battery_module=None):
+    def __init__(self, config, battery_module=None, ui_manager=None):
         global _drives_instance
         _drives_instance = self
 
         self._config = config
+        self._ui_manager = ui_manager
         self._battery = battery_module
         self._boot_time = time.time()
         self._lock = threading.Lock()
@@ -293,6 +294,11 @@ class DrivesManager:
 
             with self._lock:
                 self._last_proactive[triggered] = now
+
+            # Push to Lite UI display
+            if self._ui_manager:
+                char_name = self._config.get('CHAR', {}).get('character_name', 'TARS')
+                self._ui_manager.update_data(char_name, line, char_name)
 
             try:
                 from modules.module_router import send

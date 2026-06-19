@@ -135,45 +135,56 @@ _MOOD_ACTIVATION_THRESHOLD = 25  # emotion axis must be >= this to apply modifie
 
 
 def _apply_mood_modifiers(traits):
-    """Apply emotional state modifiers to a copy of persona traits.
+    """Apply emotional state + drive modifiers to a copy of persona traits.
 
-    Only activates when an emotion axis exceeds the threshold.
-    Modifiers scale linearly with emotion intensity (25→50% modifier, 100→full modifier).
+    Delegates to BodyStateManager for unified modifiers when available,
+    falls back to separate emotion + drive modifier computation.
     """
+    modified = dict(traits)
+
+    # Try unified body state modifiers first
+    try:
+        from modules.module_body_state import get_body_state_manager
+        bsm = get_body_state_manager()
+        if bsm is not None:
+            all_mods = bsm.get_trait_modifiers()
+            for trait_name, modifier in all_mods.items():
+                if trait_name in modified:
+                    try:
+                        original = int(modified[trait_name])
+                        modified[trait_name] = max(0, min(100, original + modifier))
+                    except (ValueError, TypeError):
+                        pass
+            return modified
+    except Exception:
+        pass
+
+    # Fallback: original separate computation
     try:
         from modules.module_dashboard_data import get_emotional_state
         emo_state = get_emotional_state()
-    except Exception:
-        return traits
-
-    active = {k: v for k, v in emo_state.items() if v >= _MOOD_ACTIVATION_THRESHOLD}
-    if not active:
-        modified = dict(traits)
-    else:
-        modified = dict(traits)
+        active = {k: v for k, v in emo_state.items() if v >= _MOOD_ACTIVATION_THRESHOLD}
         for axis, intensity in active.items():
             mods = _MOOD_MODIFIERS.get(axis)
             if not mods:
                 continue
-            # Scale modifier: at threshold (25) apply 50%, at 100 apply full
             scale = (intensity - _MOOD_ACTIVATION_THRESHOLD) / (100 - _MOOD_ACTIVATION_THRESHOLD)
-            scale = 0.5 + 0.5 * scale  # range: 0.5 to 1.0
+            scale = 0.5 + 0.5 * scale
             for trait_name, modifier in mods.items():
                 if trait_name in modified:
                     try:
                         original = int(modified[trait_name])
-                        adjusted = int(original + modifier * scale)
-                        modified[trait_name] = max(0, min(100, adjusted))
+                        modified[trait_name] = max(0, min(100, int(original + modifier * scale)))
                     except (ValueError, TypeError):
                         pass
+    except Exception:
+        pass
 
-    # Layer drive-based modifiers on top of mood modifiers
     try:
         from modules.module_drives import get_drives_manager
         dm = get_drives_manager()
         if dm is not None:
-            drive_mods = dm.get_drive_modifiers()
-            for trait_name, modifier in drive_mods.items():
+            for trait_name, modifier in dm.get_drive_modifiers().items():
                 if trait_name in modified:
                     try:
                         original = int(modified[trait_name])
@@ -241,6 +252,43 @@ def _extract_char_lines(text, char_name):
         elif stripped.startswith("{char}:"):
             lines.append(stripped[len("{char}:"):].strip())
     return " ".join(lines)
+
+
+def _inject_legacy_state_blocks(base_prompt, config):
+    """Fallback: inject the original separate emotional/drives/awareness blocks.
+
+    Used when BodyStateManager is not available.
+    """
+    try:
+        if config['EMOTION']['enabled']:
+            from modules.module_dashboard_data import get_emotional_state
+            emo_state = get_emotional_state()
+            active = {k: v for k, v in emo_state.items() if v > 0}
+            if active:
+                dominant = max(active, key=active.get)
+                parts = [f"{k}: {v}%" for k, v in sorted(active.items(), key=lambda x: -x[1])]
+                base_prompt += f"\n[EMOTIONAL STATE] Your current emotional state: {', '.join(parts)}. Dominant mood: {dominant}."
+    except Exception:
+        pass
+    try:
+        from modules.module_drives import get_drives_manager
+        dm = get_drives_manager()
+        if dm is not None:
+            drives_ctx = dm.get_drives_context()
+            if drives_ctx:
+                base_prompt += f"\n{drives_ctx}"
+    except Exception:
+        pass
+    try:
+        from modules.module_awareness import get_awareness_manager
+        am = get_awareness_manager()
+        if am is not None:
+            awareness_ctx = am.get_awareness_context()
+            if awareness_ctx:
+                base_prompt += f"\n{awareness_ctx}"
+    except Exception:
+        pass
+    return base_prompt
 
 
 def _check_patterns(short_term_memory, char_name):
@@ -721,55 +769,23 @@ Current Time: {now.strftime('%H:%M:%S')}
     else:
         queue_message("IDENTITY PROMPT: empty (no speaker identified)")
 
-    # Emotional state context (if emotion detection is enabled)
+    # Unified body state snapshot (replaces separate emotional/drives/awareness blocks)
     try:
-        if config['EMOTION']['enabled']:
-            from modules.module_dashboard_data import get_emotional_state
-            emo_state = get_emotional_state()
-            active = {k: v for k, v in emo_state.items() if v > 0}
-            if active:
-                dominant = max(active, key=active.get)
-                parts = [f"{k}: {v}%" for k, v in sorted(active.items(), key=lambda x: -x[1])]
-                base_prompt += f"\n[EMOTIONAL STATE] Your current emotional state based on recent interactions: {', '.join(parts)}. Dominant mood: {dominant}. Let this subtly influence your tone — don't mention these numbers or that you have an emotional state system."
-    except Exception:
-        pass
-
-    # Internal drives context (curiosity, social need, energy, boredom)
-    try:
-        from modules.module_drives import get_drives_manager
-        dm = get_drives_manager()
-        if dm is not None:
-            drives_ctx = dm.get_drives_context()
-            if drives_ctx:
-                base_prompt += f"\n{drives_ctx}"
-    except Exception:
-        pass
-
-    # Environment awareness context (scene description, recent events)
-    # People already mentioned in identity context are excluded to avoid duplication.
-    try:
-        from modules.module_awareness import get_awareness_manager
-        am = get_awareness_manager()
-        if am is not None:
-            # Collect names already covered by identity context
-            identity_names = set()
-            try:
-                from modules.module_identity import get_identity_manager
-                im = get_identity_manager()
-                if im is not None:
-                    identity_names = im.get_mentioned_names()
-            except Exception:
-                pass
-            awareness_ctx = am.get_awareness_context(exclude_names=identity_names)
-            if awareness_ctx:
-                base_prompt += f"\n{awareness_ctx}"
-                queue_message(f"AWARENESS PROMPT: {awareness_ctx[:120]}")
+        from modules.module_body_state import get_body_state_manager
+        bsm = get_body_state_manager()
+        if bsm is not None:
+            body_prompt = bsm.get_compact_prompt()
+            if body_prompt:
+                base_prompt += f"\n{body_prompt}"
+                queue_message(f"BODY STATE: {body_prompt}")
             else:
-                queue_message("AWARENESS PROMPT: context is empty (no one present, no scene)")
+                queue_message("BODY STATE: nothing noteworthy")
         else:
-            queue_message("AWARENESS PROMPT: manager is None")
+            # Fallback: original separate blocks when body state not initialized
+            base_prompt = _inject_legacy_state_blocks(base_prompt, config)
     except Exception as e:
-        queue_message(f"AWARENESS PROMPT: injection failed: {e}")
+        queue_message(f"BODY STATE: failed ({e}), falling back")
+        base_prompt = _inject_legacy_state_blocks(base_prompt, config)
 
     # Memory retrieval (long-term + short-term + examples)
     speed.start('memory')

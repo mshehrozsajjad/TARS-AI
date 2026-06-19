@@ -558,12 +558,19 @@ def utterance_callback(message):
         ]
         queue_message(f"ROUND: {' | '.join(parts)}")
 
-        # Notify drives system that an interaction happened
+        # Notify body state (routes to drives + applies emotion↔drive coupling)
         try:
-            from modules.module_drives import get_drives_manager
-            dm = get_drives_manager()
-            if dm is not None:
-                dm.on_interaction(user_text, reply)
+            from modules.module_body_state import get_body_state_manager
+            bsm = get_body_state_manager()
+            if bsm is not None:
+                bsm.notify_interaction(user_text, reply,
+                                       emotion=emotion, axis_scores=axis_scores)
+            else:
+                # Fallback: direct drives call
+                from modules.module_drives import get_drives_manager
+                dm = get_drives_manager()
+                if dm is not None:
+                    dm.on_interaction(user_text, reply)
         except Exception:
             pass
 

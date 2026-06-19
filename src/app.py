@@ -413,7 +413,7 @@ if __name__ == "__main__":
     if CONFIG.get('DRIVES', {}).get('enabled', 'false').lower() == 'true':
         try:
             from modules.module_drives import DrivesManager
-            drives_manager = DrivesManager(config=CONFIG, battery_module=battery)
+            drives_manager = DrivesManager(config=CONFIG, battery_module=battery, ui_manager=ui_manager)
             drives_manager.start()
             queue_message("LOAD: Drives system started")
         except Exception as e:
@@ -429,6 +429,14 @@ if __name__ == "__main__":
             queue_message("LOAD: Awareness system started")
         except Exception as e:
             queue_message(f"WARNING: Awareness system not available: {e}")
+
+    # === Body State (unified nervous system state layer) ===
+    body_state_manager = None
+    try:
+        from modules.module_body_state import BodyStateManager
+        body_state_manager = BodyStateManager(config=CONFIG, battery_module=battery)
+    except Exception as e:
+        queue_message(f"WARNING: Body state system not available: {e}")
 
     # === Main Loop ===
     try:
