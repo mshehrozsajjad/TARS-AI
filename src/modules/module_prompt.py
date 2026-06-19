@@ -745,12 +745,22 @@ Current Time: {now.strftime('%H:%M:%S')}
     except Exception:
         pass
 
-    # Environment awareness context (who's present, scene description)
+    # Environment awareness context (scene description, recent events)
+    # People already mentioned in identity context are excluded to avoid duplication.
     try:
         from modules.module_awareness import get_awareness_manager
         am = get_awareness_manager()
         if am is not None:
-            awareness_ctx = am.get_awareness_context()
+            # Collect names already covered by identity context
+            identity_names = set()
+            try:
+                from modules.module_identity import get_identity_manager
+                im = get_identity_manager()
+                if im is not None:
+                    identity_names = im.get_mentioned_names()
+            except Exception:
+                pass
+            awareness_ctx = am.get_awareness_context(exclude_names=identity_names)
             if awareness_ctx:
                 base_prompt += f"\n{awareness_ctx}"
                 queue_message(f"AWARENESS PROMPT: {awareness_ctx[:120]}")

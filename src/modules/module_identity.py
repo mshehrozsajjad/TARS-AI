@@ -29,12 +29,19 @@ def get_identity_manager():
 class IdentityManager:
     """Fuses speaker ID (voice) and face recognition (vision) into unified identity."""
 
+    # Awareness face data older than this is considered stale
+    AWARENESS_FACE_TTL = 10.0  # seconds
+
     def __init__(self, speaker_id_manager=None, ui_manager=None):
         global _identity_instance
         _identity_instance = self
 
         self._speaker_id = speaker_id_manager
         self._ui_manager = ui_manager
+
+        # Face data fed from AwarenessManager (runs every ~3s on all devices)
+        self._awareness_faces = []       # [{"name": str, "confidence": float}, ...]
+        self._awareness_faces_time = 0.0  # monotonic timestamp of last update
 
     def _get_detection_manager(self):
         """Safely retrieve the DetectionManager from ui_manager."""
@@ -49,20 +56,44 @@ class IdentityManager:
             return None
         return dm._get_face_id_detector()
 
+    def update_awareness_faces(self, faces: list):
+        """Receive face detection results from the AwarenessManager.
+
+        Called every ~3 seconds by the awareness loop so face data is
+        always available — even on devices without the UI detection view.
+
+        Args:
+            faces: List of dicts with 'name' and 'confidence' keys.
+        """
+        self._awareness_faces = faces or []
+        self._awareness_faces_time = time.monotonic()
+
     def get_recognized_faces(self):
-        """Get structured face recognition results from the detection manager.
+        """Get structured face recognition results.
+
+        Prefers the UI DetectionManager (higher FPS when the view is open).
+        Falls back to AwarenessManager face data (runs on all devices, ~3s cadence).
 
         Returns:
             List of dicts with 'name' and 'confidence' keys, e.g.
             [{"name": "Alice", "confidence": 0.85}, {"name": "UNKNOWN", "confidence": 0.0}]
         """
+        # Try UI detection manager first (higher cadence when active)
         dm = self._get_detection_manager()
-        if dm is None:
-            return []
-        try:
-            return dm.get_recognized_faces()
-        except Exception:
-            return []
+        if dm is not None:
+            try:
+                ui_faces = dm.get_recognized_faces()
+                if ui_faces:
+                    return ui_faces
+            except Exception:
+                pass
+
+        # Fallback: awareness system face data (works on all devices)
+        age = time.monotonic() - self._awareness_faces_time
+        if self._awareness_faces and age < self.AWARENESS_FACE_TTL:
+            return self._awareness_faces
+
+        return []
 
     def get_current_speaker(self) -> Optional[str]:
         """Get the current speaker, preferring voice ID.
@@ -169,7 +200,13 @@ class IdentityManager:
         if has_unknown_face and not voice_is_unknown:
             parts.append("An unrecognized person is also visible on camera.")
 
+        self._last_mentioned_names = mentioned
         return " ".join(parts)
+
+    def get_mentioned_names(self) -> set:
+        """Return names mentioned in the last get_identity_context() call.
+        Used by awareness context to avoid duplicating people."""
+        return getattr(self, '_last_mentioned_names', set())
 
     def get_active_user_name(self, fallback: str) -> str:
         """Get the best-known user name for conversation display.

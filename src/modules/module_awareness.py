@@ -409,6 +409,16 @@ class AwarenessManager:
         if faces is None:
             return
 
+        # Forward face data to IdentityManager so it can use face
+        # recognition for speaker identification (even without the UI)
+        try:
+            from modules.module_identity import get_identity_manager
+            im = get_identity_manager()
+            if im is not None:
+                im.update_awareness_faces(faces)
+        except Exception:
+            pass
+
         # Update presence tracker
         events = self._presence.update(faces)
 
@@ -609,8 +619,15 @@ class AwarenessManager:
         """Return the latest scene description."""
         return self._scene_description
 
-    def get_awareness_context(self):
-        """Build formatted context string for LLM prompt injection."""
+    def get_awareness_context(self, exclude_names=None):
+        """Build formatted context string for LLM prompt injection.
+
+        Args:
+            exclude_names: Set of names already mentioned in the identity
+                context — these are omitted from the "People present" list
+                to avoid duplication. Scene and events are always included.
+        """
+        exclude = exclude_names or set()
         present = self._presence.get_present()
         events = self._presence.get_recent_events(minutes=10)
         scene = self._scene_description
@@ -620,10 +637,12 @@ class AwarenessManager:
 
         parts = []
 
-        # People present
+        # People present (skip those already in identity context)
         if present:
             people_parts = []
             for p in present:
+                if p["name"] in exclude:
+                    continue
                 duration = p["duration_seconds"]
                 if duration < 60:
                     dur_str = "just arrived"
@@ -632,13 +651,14 @@ class AwarenessManager:
                 else:
                     dur_str = f"here for {duration / 3600:.1f} hours"
                 people_parts.append(f"{p['name']} ({dur_str})")
-            parts.append(f"People present: {', '.join(people_parts)}")
+            if people_parts:
+                parts.append(f"People present: {', '.join(people_parts)}")
 
         # Scene description
         if scene:
             parts.append(f"Scene: {scene}")
 
-        # Recent events
+        # Recent events (always include — timing context is useful)
         arrival_names = [e["name"] for e in events if e["type"] == "arrived"]
         departure_names = [e["name"] for e in events if e["type"] == "departed"]
         if arrival_names:
