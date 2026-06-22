@@ -74,22 +74,41 @@ class LiveKitDisplay:
 
     def _render_loop(self):
         """Pygame render loop — runs in dedicated thread."""
-        # Prevent SDL from grabbing ALSA audio devices — we use sounddevice
+        import pygame
+
+        # Prevent SDL audio init from grabbing ALSA — must be set before
+        # pygame.display.init(). We restore it after so sounddevice isn't
+        # affected in other threads.
+        old_audio_driver = os.environ.get("SDL_AUDIODRIVER")
         os.environ["SDL_AUDIODRIVER"] = "dummy"
 
-        import pygame
-        # Only init display — NOT audio (would conflict with sounddevice)
         pygame.display.init()
+
+        # Restore env so sounddevice (PortAudio) isn't affected
+        if old_audio_driver is None:
+            os.environ.pop("SDL_AUDIODRIVER", None)
+        else:
+            os.environ["SDL_AUDIODRIVER"] = old_audio_driver
+
+        # Display rotation — match ui_lite pattern
+        display_w, display_h = self._width, self._height
+        if display_h > display_w:
+            # Portrait physical screen — no rotation needed
+            logical_w, logical_h = display_w, display_h
+            self._rotate = 0
+        else:
+            # Landscape physical screen — render portrait, rotate 270°
+            logical_w, logical_h = display_h, display_w
+            self._rotate = 270
 
         flags = pygame.FULLSCREEN | pygame.NOFRAME if self._fullscreen else 0
         screen = pygame.display.set_mode(
-            (self._width, self._height), flags
+            (display_w, display_h), flags
         )
         pygame.display.set_caption("TARS LiveKit")
         pygame.mouse.set_visible(False)
         clock = pygame.time.Clock()
 
-        # Black until first frame
         screen.fill((0, 0, 0))
         pygame.display.flip()
 
@@ -106,27 +125,33 @@ class LiveKitDisplay:
                 frame = self._frame
 
             if frame is not None:
-                # RGBA numpy array → pygame surface, scaled to screen
                 h, w = frame.shape[:2]
-                # Pygame expects (width, height) and RGB — drop alpha
                 rgb = frame[:, :, :3]
-                # Create surface from buffer — pygame wants (w, h, 3) contiguous
                 surface = pygame.image.frombuffer(
                     rgb.tobytes(), (w, h), "RGB"
                 )
-                # Scale to fill screen while keeping aspect ratio
-                scale_w = self._width / w
-                scale_h = self._height / h
-                scale = min(scale_w, scale_h)
+
+                # Scale to fill the logical (pre-rotation) surface
+                scale_w = logical_w / w
+                scale_h = logical_h / h
+                scale = max(scale_w, scale_h)  # fill, not fit
                 new_w = int(w * scale)
                 new_h = int(h * scale)
                 scaled = pygame.transform.scale(surface, (new_w, new_h))
 
-                # Center on screen
-                x = (self._width - new_w) // 2
-                y = (self._height - new_h) // 2
-                screen.fill((0, 0, 0))
-                screen.blit(scaled, (x, y))
+                # Crop to logical size (center crop)
+                crop_x = (new_w - logical_w) // 2
+                crop_y = (new_h - logical_h) // 2
+                composed = pygame.Surface((logical_w, logical_h))
+                composed.blit(scaled, (-crop_x, -crop_y))
+
+                # Apply rotation to match physical screen orientation
+                if self._rotate != 0:
+                    final = pygame.transform.rotate(composed, self._rotate)
+                else:
+                    final = composed
+
+                screen.blit(final, (0, 0))
                 pygame.display.flip()
 
             clock.tick(30)
@@ -439,11 +464,18 @@ class TarsLiveKitClient:
             if track.kind == _rtc.TrackKind.KIND_AUDIO:
                 # Route agent audio to local speaker
                 if self._audio_player is not None:
-                    async def _start_playback(t):
-                        await self._audio_player.add_track(t)
-                        await self._audio_player.start()
-                    asyncio.ensure_future(_start_playback(track))
-                    queue_message("LIVEKIT: Agent audio → speaker")
+                    async def _add_and_start(t, player):
+                        await player.add_track(t)
+                        try:
+                            await player.start()
+                        except RuntimeError:
+                            pass  # already started — just adding track
+                    asyncio.ensure_future(
+                        _add_and_start(track, self._audio_player)
+                    )
+                    queue_message(
+                        f"LIVEKIT: Audio track from {participant.identity} → speaker"
+                    )
                 set_tars_state(TarsState.TALKING)
 
             elif track.kind == _rtc.TrackKind.KIND_VIDEO:
