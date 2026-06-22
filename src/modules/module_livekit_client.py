@@ -667,7 +667,9 @@ class TarsLiveKitClient:
                 from modules.module_movements import (
                     walk_forward, walk_backward, step_forward, step_backward,
                     turn_left, turn_right, turn_left_slow, turn_right_slow,
-                    neutral_legs,
+                    neutral_legs, wave_right, wave_left,
+                    right_hi, left_hi, bow, laugh, excited,
+                    happy_dance, tilt_right, tilt_left,
                 )
 
                 movements = {
@@ -678,6 +680,16 @@ class TarsLiveKitClient:
                     "turn_left": turn_left if speed == "fast" else turn_left_slow,
                     "turn_right": turn_right if speed == "fast" else turn_right_slow,
                     "neutral": neutral_legs,
+                    "wave_right": wave_right,
+                    "wave_left": wave_left,
+                    "right_hi": right_hi,
+                    "left_hi": left_hi,
+                    "bow": bow,
+                    "laugh": laugh,
+                    "excited": excited,
+                    "happy_dance": happy_dance,
+                    "tilt_right": tilt_right,
+                    "tilt_left": tilt_left,
                 }
 
                 func = movements.get(name)

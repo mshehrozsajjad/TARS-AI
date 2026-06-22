@@ -90,12 +90,14 @@ class TarsAgent(Agent):
         direction: str,
         speed: str = "slow",
     ) -> str:
-        """Move TARS in a direction. Use this when asked to walk, step, or turn.
+        """Move TARS physically. Use for walking, turning, waving, bowing, dancing.
 
         Args:
             direction: One of: walk_forward, walk_backward, step_forward,
-                       step_backward, turn_left, turn_right, neutral
-            speed: Movement speed — slow or fast
+                       step_backward, turn_left, turn_right, neutral,
+                       wave_right, wave_left, right_hi, left_hi,
+                       bow, laugh, excited, happy_dance, tilt_right, tilt_left
+            speed: Movement speed — slow or fast (applies to turning only)
         """
         payload = json.dumps({"name": direction, "speed": speed})
         try:
@@ -117,9 +119,7 @@ class TarsAgent(Agent):
         """Perform a body gesture or animation. Use for expressive physical reactions.
 
         Args:
-            name: Gesture name — nod, lean, recoil, rock, bounce, shrug, wave,
-                  settle, bow, laugh, excited, happy_dance, wave_right, wave_left,
-                  right_hi, left_hi, tilt_right, tilt_left
+            name: Gesture name. Must be one of: nod, lean, recoil, rock, bounce, shrug, wave, settle
         """
         payload = json.dumps({"name": name})
         try:
