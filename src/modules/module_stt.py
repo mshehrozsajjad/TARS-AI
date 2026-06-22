@@ -1681,10 +1681,16 @@ class STTManager:
         norm = (sensitivity - 1) / 9.0
         threshold = round(max(0.30, 0.80 - norm * 0.50), 2)
 
+        if self.DEBUG:
+            queue_message(f"DEBUG: openWakeWord sensitivity={sensitivity}, threshold={threshold}")
+
         RATE = self.MODEL_RATE
         # openWakeWord works best with 1280-sample chunks (80ms at 16kHz)
         chunk_size = 1280
         wake_detected = False
+        # Track peak score for periodic debug logging
+        _debug_peak = 0.0
+        _debug_counter = 0
 
         # Reset model buffers for a fresh detection session
         self.oww_model.reset()
@@ -1718,11 +1724,23 @@ class STTManager:
                 audio_chunk = data.flatten().astype(np.int16)
                 prediction = self.oww_model.predict(audio_chunk)
 
+                # Debug: log scores periodically so user can see what's happening
+                if self.DEBUG:
+                    for mn, sc in prediction.items():
+                        if sc > _debug_peak:
+                            _debug_peak = sc
+                    _debug_counter += 1
+                    # Log every ~25 chunks (~2 seconds) to avoid flooding
+                    if _debug_counter % 25 == 0:
+                        scores_str = ", ".join(f"{mn}={sc:.4f}" for mn, sc in prediction.items())
+                        queue_message(f"DEBUG: openWakeWord scores: {scores_str} | peak={_debug_peak:.4f} | threshold={threshold}")
+                        _debug_peak = 0.0
+
                 # Check each model's score against threshold
                 for model_name, score in prediction.items():
                     if score >= threshold:
                         if self.DEBUG:
-                            queue_message(f"DEBUG: openWakeWord '{model_name}' score={score:.3f} (threshold={threshold})")
+                            queue_message(f"DEBUG: openWakeWord TRIGGERED '{model_name}' score={score:.3f} (threshold={threshold})")
 
                         # Build float32 audio window for wake gates (~2s of recent audio)
                         audio_window = audio_chunk.astype(np.float32) / 32768.0
