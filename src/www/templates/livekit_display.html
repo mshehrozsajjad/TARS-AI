@@ -83,13 +83,17 @@ async function start() {
 
     room.on(LivekitClient.RoomEvent.TrackSubscribed, (track, publication, participant) => {
         if (track.kind === LivekitClient.Track.Kind.Video) {
+            // Request low resolution from SFU to save Pi RAM/bandwidth
+            publication.setVideoQuality(LivekitClient.VideoQuality.LOW);
+            publication.setVideoDimensions({width: 320, height: 240});
+
             const el = track.attach();
             el.style.width = '100%';
             el.style.height = '100%';
             el.style.objectFit = 'cover';
             el.muted = true;
             container.appendChild(el);
-            status.textContent = 'Video: ' + participant.identity;
+            status.textContent = 'Video (low-res): ' + participant.identity;
         } else if (track.kind === LivekitClient.Track.Kind.Audio && browserAudio) {
             const el = track.attach();
             el.autoplay = true;
