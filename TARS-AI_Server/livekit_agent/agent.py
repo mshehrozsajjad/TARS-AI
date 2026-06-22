@@ -99,7 +99,7 @@ class TarsAgent(Agent):
         """
         payload = json.dumps({"name": direction, "speed": speed})
         try:
-            response = await context.session.room.local_participant.perform_rpc(
+            response = await context.session.room_io.room.local_participant.perform_rpc(
                 destination_identity="tars-pi",
                 method="move",
                 payload=payload,
@@ -123,7 +123,7 @@ class TarsAgent(Agent):
         """
         payload = json.dumps({"name": name})
         try:
-            response = await context.session.room.local_participant.perform_rpc(
+            response = await context.session.room_io.room.local_participant.perform_rpc(
                 destination_identity="tars-pi",
                 method="gesture",
                 payload=payload,
@@ -147,7 +147,7 @@ class TarsAgent(Agent):
         """
         payload = json.dumps({"emotion": emotion})
         try:
-            response = await context.session.room.local_participant.perform_rpc(
+            response = await context.session.room_io.room.local_participant.perform_rpc(
                 destination_identity="tars-pi",
                 method="set_emotion",
                 payload=payload,
@@ -163,7 +163,7 @@ class TarsAgent(Agent):
     ) -> str:
         """Check TARS battery level, voltage, and charging state."""
         try:
-            response = await context.session.room.local_participant.perform_rpc(
+            response = await context.session.room_io.room.local_participant.perform_rpc(
                 destination_identity="tars-pi",
                 method="get_battery",
                 payload="{}",
@@ -179,7 +179,7 @@ class TarsAgent(Agent):
     ) -> str:
         """Disable all servos to relax TARS body. Use when asked to rest or relax."""
         try:
-            response = await context.session.room.local_participant.perform_rpc(
+            response = await context.session.room_io.room.local_participant.perform_rpc(
                 destination_identity="tars-pi",
                 method="disable_servos",
                 payload="{}",
