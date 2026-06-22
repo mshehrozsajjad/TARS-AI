@@ -37,6 +37,13 @@ _eot = threading.Event()
 # Deepgram end-of-turn confidence threshold (0.0–1.0).
 EOT_THRESHOLD = 0.5
 
+# After Deepgram signals end-of-turn, require this many consecutive silent
+# frames (each ~250ms) from local VAD before actually ending recording.
+# This allows multi-sentence utterances: if the user pauses briefly between
+# sentences Deepgram may fire EOT, but VAD won't have accumulated enough
+# silence yet, and when the user resumes speaking the EOT is cleared.
+EOT_SILENCE_FRAMES = 3  # ~750ms of confirmed silence after EOT
+
 
 def _extract_transcript(message):
     """Extract transcript text from a Deepgram v2 message (plain dict)."""
@@ -245,11 +252,18 @@ def transcribe_streaming(stt_manager):
                 # Run local VAD
                 is_silence, detected_speech, silent_frames = vad_func(data, detected_speech, silent_frames)
 
-                # ----- Fast path: Deepgram end-of-turn confidence -----
+                # ----- Fast path: Deepgram EOT + local VAD silence confirmation -----
+                # Deepgram provides semantic turn detection; local VAD provides
+                # acoustic confirmation.  Only end when BOTH agree.  If the user
+                # resumes speaking, VAD resets silent_frames and we clear EOT.
                 if _eot.is_set() and detected_speech and speech_frames >= min_speech_frames:
-                    print(f"[DEEPGRAM] EOT (Deepgram) after {speech_frames} speech frames "
-                          f"({(time.monotonic() - t_connected)*1000:.0f}ms)", flush=True)
-                    break
+                    if is_silence and silent_frames >= EOT_SILENCE_FRAMES:
+                        print(f"[DEEPGRAM] EOT (Deepgram+VAD) after {speech_frames} speech frames "
+                              f"({(time.monotonic() - t_connected)*1000:.0f}ms)", flush=True)
+                        break
+                    elif not is_silence:
+                        # User resumed speaking — clear EOT, keep recording
+                        _eot.clear()
 
                 # ----- Slow fallback: local VAD silence timeout -----
                 _gesture_running = False
