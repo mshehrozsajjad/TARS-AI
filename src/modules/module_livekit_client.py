@@ -28,6 +28,109 @@ from modules.module_state import set_tars_state, TarsState
 
 CONFIG = load_config()
 
+
+# ── Pygame video display ─────────────────────────────────────────────
+
+class LiveKitDisplay:
+    """Simple fullscreen Pygame display for rendering video frames.
+
+    Runs a render loop in its own thread. Call set_frame(rgba_array)
+    from any thread to update the displayed image.
+    """
+
+    def __init__(self):
+        self._frame = None
+        self._frame_lock = threading.Lock()
+        self._running = False
+        self._thread = None
+
+        ui_cfg = CONFIG.get("UI", {})
+        self._width = ui_cfg.get("screen_width", 480)
+        self._height = ui_cfg.get("screen_height", 320)
+        self._fullscreen = ui_cfg.get("fullscreen", True)
+
+    def start(self):
+        """Start the display thread."""
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(
+            target=self._render_loop,
+            name="LiveKitDisplay",
+            daemon=True,
+        )
+        self._thread.start()
+        queue_message(f"LIVEKIT: Display started ({self._width}x{self._height})")
+
+    def stop(self):
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=3)
+
+    def set_frame(self, rgba_array):
+        """Update the displayed frame. Called from async video handler."""
+        with self._frame_lock:
+            self._frame = rgba_array
+
+    def _render_loop(self):
+        """Pygame render loop — runs in dedicated thread."""
+        os.environ.setdefault("SDL_VIDEODRIVER", "kmsdrm")
+
+        import pygame
+        pygame.init()
+
+        flags = pygame.FULLSCREEN | pygame.NOFRAME if self._fullscreen else 0
+        screen = pygame.display.set_mode(
+            (self._width, self._height), flags
+        )
+        pygame.display.set_caption("TARS LiveKit")
+        pygame.mouse.set_visible(False)
+        clock = pygame.time.Clock()
+
+        # Black until first frame
+        screen.fill((0, 0, 0))
+        pygame.display.flip()
+
+        while self._running:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self._running = False
+                    break
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                    self._running = False
+                    break
+
+            with self._frame_lock:
+                frame = self._frame
+
+            if frame is not None:
+                # RGBA numpy array → pygame surface, scaled to screen
+                h, w = frame.shape[:2]
+                # Pygame expects (width, height) and RGB — drop alpha
+                rgb = frame[:, :, :3]
+                # Create surface from buffer — pygame wants (w, h, 3) contiguous
+                surface = pygame.image.frombuffer(
+                    rgb.tobytes(), (w, h), "RGB"
+                )
+                # Scale to fill screen while keeping aspect ratio
+                scale_w = self._width / w
+                scale_h = self._height / h
+                scale = min(scale_w, scale_h)
+                new_w = int(w * scale)
+                new_h = int(h * scale)
+                scaled = pygame.transform.scale(surface, (new_w, new_h))
+
+                # Center on screen
+                x = (self._width - new_w) // 2
+                y = (self._height - new_h) // 2
+                screen.fill((0, 0, 0))
+                screen.blit(scaled, (x, y))
+                pygame.display.flip()
+
+            clock.tick(30)
+
+        pygame.quit()
+
 # ── Lazy SDK import ──────────────────────────────────────────────────
 
 _rtc = None
@@ -110,6 +213,10 @@ class TarsLiveKitClient:
         self._audio_player = None
         self._video_stream = None
 
+        # Video display
+        self._display = LiveKitDisplay()
+        self._display.start()
+
         # Config
         lk_cfg = CONFIG["LIVEKIT"]
         self._livekit_url = lk_cfg["livekit_url"]
@@ -191,6 +298,9 @@ class TarsLiveKitClient:
     async def disconnect(self):
         """Disconnect from the room and clean up."""
         self._shutdown.set()
+
+        if self._display is not None:
+            self._display.stop()
 
         if self._video_stream is not None:
             try:
@@ -292,23 +402,22 @@ class TarsLiveKitClient:
         stream = _rtc.VideoStream(track)
         self._video_stream = stream
 
-        queue_message("LIVEKIT: Receiving agent video stream")
+        queue_message("LIVEKIT: Receiving agent video stream → display")
 
         async for frame_event in stream:
             if self._shutdown.is_set():
                 break
 
             frame = frame_event.frame
-            # Convert to RGBA for pygame
+            # Convert to RGBA numpy array
             rgba_frame = frame.convert(_rtc.VideoBufferType.RGBA)
             frame_data = np.frombuffer(rgba_frame.data, dtype=np.uint8)
             frame_data = frame_data.reshape(
                 (rgba_frame.height, rgba_frame.width, 4)
             )
 
-            # Push to UI manager if available
-            if self._ui_manager and hasattr(self._ui_manager, 'set_livekit_frame'):
-                self._ui_manager.set_livekit_frame(frame_data)
+            # Push to display
+            self._display.set_frame(frame_data)
 
     # ── Room event handlers ──────────────────────────────────────
 

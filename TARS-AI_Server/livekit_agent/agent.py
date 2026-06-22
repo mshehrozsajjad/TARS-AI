@@ -2,15 +2,19 @@
 TARS LiveKit Agent — runs on LiveKit Cloud or a server.
 
 Joins the same LiveKit room as the Pi client. Subscribes to Pi's mic audio,
-processes it through STT → LLM → TTS, and publishes audio back.
+processes it through STT → LLM → TTS, and publishes audio + video back.
 Uses @function_tool for skills — physical actions are forwarded to the Pi
 via RPC, virtual actions (web search, etc.) run directly on the agent.
+
+Video avatar powered by Beyond Presence (Bey) — publishes a video track
+that the Pi client receives and renders on its Pygame display.
 
 Run:
     python agent.py dev          # local development
     python agent.py start        # production
 """
 
+import logging
 import os
 import json
 from typing import Any
@@ -21,12 +25,31 @@ from livekit.agents import (
     AgentServer,
     AgentSession,
     Agent,
+    AutoSubscribe,
     RunContext,
     function_tool,
-    inference,
+    cli,
 )
+from livekit.plugins import bey, deepgram, elevenlabs, openai
 
 load_dotenv()
+
+logger = logging.getLogger("tars-agent")
+
+# ── Config from env ──────────────────────────────────────────────────
+
+ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb")
+ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2")
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
+BEY_AVATAR_ENABLED = os.getenv("BEY_AVATAR_ENABLED", "true").lower() not in ("0", "false", "no", "off")
+BEY_AVATAR_ID = os.getenv("BEY_AVATAR_ID", "")
+LIVEKIT_URL = os.getenv("LIVEKIT_URL", "")
+
+# Normalise LIVEKIT_URL to wss://
+if LIVEKIT_URL.startswith("https://"):
+    LIVEKIT_URL = LIVEKIT_URL.replace("https://", "wss://", 1)
+elif LIVEKIT_URL.startswith("http://"):
+    LIVEKIT_URL = LIVEKIT_URL.replace("http://", "ws://", 1)
 
 # ── TARS character prompt ────────────────────────────────────────────
 
@@ -178,8 +201,6 @@ class TarsAgent(Agent):
         Args:
             query: The search query
         """
-        # Use LLM provider's built-in web search if available,
-        # otherwise return a placeholder for now
         return json.dumps({
             "status": "ok",
             "message": f"Web search for '{query}' — integrate your preferred "
@@ -197,14 +218,38 @@ server = AgentServer()
 async def tars_session(ctx: agents.JobContext):
     """Called when a room is created — starts a TARS agent session."""
 
-    voice_id = os.getenv("ELEVENLABS_VOICE_ID", "NpFqhOmVs00E5GaaYrtI")
+    await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
+
+    logger.info("TARS agent session starting in room %s", ctx.room.name)
+
+    # ── Bey video avatar ─────────────────────────────────────────
+    # Must be created and started BEFORE AgentSession.start() so its
+    # DataStreamAudioOutput is wired into the session output before
+    # the framework sets up TranscriptSynchronizer.
+    avatar = None
+    if BEY_AVATAR_ENABLED:
+        if not os.getenv("BEY_API_KEY"):
+            logger.warning("BEY_AVATAR_ENABLED is true but BEY_API_KEY not set — skipping avatar")
+        elif not BEY_AVATAR_ID:
+            logger.warning("BEY_AVATAR_ENABLED is true but BEY_AVATAR_ID not set — skipping avatar")
+        else:
+            logger.info("Creating Bey avatar session (avatar_id=%s)", BEY_AVATAR_ID)
+            avatar = bey.AvatarSession(avatar_id=BEY_AVATAR_ID)
+
+    # ── Voice pipeline ───────────────────────────────────────────
     session = AgentSession(
-        stt=inference.STT(model="deepgram/nova-3", language="en"),
-        llm=inference.LLM(model="openai/gpt-4o-mini"),
-        tts=inference.TTS(
-            model=f"elevenlabs/eleven_multilingual_v2:{voice_id}",
+        stt=deepgram.STT(model="nova-3", language="en"),
+        llm=openai.LLM(model=LLM_MODEL),
+        tts=elevenlabs.TTS(
+            voice_id=ELEVENLABS_VOICE_ID,
+            model=ELEVENLABS_MODEL,
         ),
     )
+
+    # Start avatar BEFORE session (order matters — see examlingo notes)
+    if avatar:
+        await avatar.start(session, room=ctx.room, livekit_url=LIVEKIT_URL)
+        logger.info("Bey avatar started — video track publishing")
 
     await session.start(
         room=ctx.room,
@@ -218,4 +263,4 @@ async def tars_session(ctx: agents.JobContext):
 
 
 if __name__ == "__main__":
-    agents.cli.run_app(server)
+    cli.run_app(server)

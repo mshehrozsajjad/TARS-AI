@@ -304,7 +304,8 @@ if __name__ == "__main__":
     queue_message(f"INFO: CPU Temperature: {temp:.1f}°C")
 
     # === Initialize UI Manager ===
-    if UI_AVAILABLE and show_ui and CONFIG["UI"]["UI_enabled"]:
+    # In LiveKit mode, the LiveKit client manages its own Pygame display
+    if UI_AVAILABLE and show_ui and CONFIG["UI"]["UI_enabled"] and not LIVEKIT_MODE:
         ui_manager = UIManager(
             shutdown_event=shutdown_event,
             battery_module=battery,
