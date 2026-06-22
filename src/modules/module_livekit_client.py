@@ -69,17 +69,18 @@ def _generate_token(room_name, identity):
             "LIVEKIT_API_KEY and LIVEKIT_API_SECRET must be set in .env"
         )
 
-    token = AccessToken(api_key, api_secret)
-    token.identity = identity
-    token.name = identity
-
-    grants = VideoGrants(
-        room_join=True,
-        room=room_name,
-        can_publish=True,
-        can_subscribe=True,
+    token = (
+        AccessToken(api_key, api_secret)
+        .with_identity(identity)
+        .with_name(identity)
+        .with_grants(VideoGrants(
+            room_join=True,
+            room=room_name,
+            can_publish=True,
+            can_subscribe=True,
+            can_publish_data=True,
+        ))
     )
-    token.video_grants = grants
 
     return token.to_jwt()
 
