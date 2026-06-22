@@ -9,7 +9,6 @@
 html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
 
 #video-container {
-    /* Rotate to portrait on landscape screen */
     position: absolute;
     top: 50%;
     left: 50%;
@@ -26,30 +25,20 @@ video {
     object-fit: cover;
 }
 
-#controls {
+#close-btn {
     position: fixed;
     top: 10px;
     right: 10px;
     z-index: 9999;
-    display: flex;
-    gap: 8px;
-    align-items: center;
-}
-
-#controls button {
-    background: rgba(255,255,255,0.8);
-    color: #000;
+    background: rgba(255,0,0,0.7);
+    color: #fff;
     border: none;
-    border-radius: 6px;
-    padding: 6px 12px;
-    font-size: 14px;
+    border-radius: 50%;
+    width: 40px;
+    height: 40px;
+    font-size: 20px;
     cursor: pointer;
-    font-family: monospace;
 }
-
-#controls button:active { background: rgba(255,255,255,1); }
-
-#close-btn { background: rgba(255,0,0,0.7) !important; color: #fff !important; }
 
 #status {
     position: fixed;
@@ -62,19 +51,12 @@ video {
     background: rgba(0,0,0,0.6);
     padding: 4px 8px;
     border-radius: 4px;
-    max-width: 90vw;
-    word-wrap: break-word;
 }
 </style>
 </head>
 <body>
 
-<div id="controls">
-    <button id="audio-btn" onclick="toggleAudio()">Audio: ???</button>
-    <button id="vol-down" onclick="changeVol(-0.2)">Vol-</button>
-    <button id="vol-up" onclick="changeVol(0.2)">Vol+</button>
-    <button id="close-btn" onclick="window.close()">X</button>
-</div>
+<button id="close-btn" onclick="window.close()">X</button>
 <div id="status">Connecting...</div>
 <div id="video-container"></div>
 
@@ -82,35 +64,6 @@ video {
 <script>
 const container = document.getElementById('video-container');
 const status = document.getElementById('status');
-const audioBtn = document.getElementById('audio-btn');
-
-// Track all audio elements so we can control them
-const audioElements = [];
-let audioMuted = false;
-let audioVolume = 1.0;
-
-function updateAudioBtn() {
-    const count = audioElements.length;
-    if (count === 0) {
-        audioBtn.textContent = 'Audio: no tracks';
-    } else {
-        audioBtn.textContent = audioMuted
-            ? 'Audio: MUTED (' + count + ')'
-            : 'Audio: ON vol=' + Math.round(audioVolume * 100) + '% (' + count + ')';
-    }
-}
-
-function toggleAudio() {
-    audioMuted = !audioMuted;
-    audioElements.forEach(el => { el.muted = audioMuted; });
-    updateAudioBtn();
-}
-
-function changeVol(delta) {
-    audioVolume = Math.max(0, Math.min(1, audioVolume + delta));
-    audioElements.forEach(el => { el.volume = audioVolume; });
-    updateAudioBtn();
-}
 
 async function start() {
     status.textContent = 'Fetching token...';
@@ -122,8 +75,6 @@ async function start() {
     const room = new LivekitClient.Room({
         adaptiveStream: true,
         dynacast: false,
-        audioCaptureDefaults: { echoCancellation: true, noiseSuppression: true },
-        audioOutput: { deviceId: 'default' },
     });
 
     room.on(LivekitClient.RoomEvent.TrackSubscribed, (track, publication, participant) => {
@@ -136,35 +87,23 @@ async function start() {
             status.textContent = 'Video: ' + participant.identity;
         } else if (track.kind === LivekitClient.Track.Kind.Audio) {
             const el = track.attach();
-            el.volume = audioVolume;
-            el.muted = audioMuted;
             el.autoplay = true;
+            el.volume = 1.0;
             document.body.appendChild(el);
-            audioElements.push(el);
-            updateAudioBtn();
-            status.textContent += ' | Audio: ' + participant.identity;
-
-            // Force play — browsers may block autoplay
-            el.play().catch(err => {
-                status.textContent += ' [autoplay blocked - tap Audio btn]';
+            el.play().then(() => {
+                status.textContent += ' | Audio playing';
+            }).catch(err => {
+                status.textContent += ' | Audio BLOCKED: ' + err.message;
             });
         }
     });
 
     room.on(LivekitClient.RoomEvent.TrackUnsubscribed, (track) => {
-        const detached = track.detach();
-        detached.forEach(el => {
-            const idx = audioElements.indexOf(el);
-            if (idx !== -1) audioElements.splice(idx, 1);
-            el.remove();
-        });
-        updateAudioBtn();
+        track.detach().forEach(el => el.remove());
     });
 
     room.on(LivekitClient.RoomEvent.Disconnected, () => {
         status.textContent = 'Disconnected — reconnecting...';
-        audioElements.length = 0;
-        updateAudioBtn();
         setTimeout(start, 3000);
     });
 
@@ -173,7 +112,6 @@ async function start() {
     });
 
     await room.connect(url, token);
-    updateAudioBtn();
 }
 
 (async function init() {

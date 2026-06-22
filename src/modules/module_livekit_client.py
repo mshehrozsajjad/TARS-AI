@@ -113,8 +113,8 @@ def _start_display_server(livekit_url, room_name, port=8888):
         _browser_process = subprocess.Popen(
             [
                 chromium_bin,
-                # "--kiosk",  # TODO: enable once video display is finalized
-                # "--noerrdialogs",
+                "--kiosk",  # TODO: enable once video display is finalized
+                "--noerrdialogs",
                 "--disable-infobars",
                 "--disable-session-crashed-bubble",
                 "--autoplay-policy=no-user-gesture-required",
@@ -253,7 +253,12 @@ class TarsLiveKitClient:
         room_prefix = self._room_name
         self._room_name = f"{room_prefix}-{uuid.uuid4().hex[:8]}"
 
-        self._room = _rtc.Room()
+        # Don't auto-subscribe — browser handles all incoming audio/video
+        self._room = _rtc.Room(
+            room_options=_rtc.RoomOptions(
+                auto_subscribe=False,
+            ),
+        )
         token = _generate_token(self._room_name, self._identity)
 
         self._register_room_events()
