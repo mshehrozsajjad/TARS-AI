@@ -65,9 +65,11 @@ def _start_display_server(livekit_url, room_name, port=8888):
                 token = _generate_token(
                     _display_room_name, "tars-display"
                 )
+                lk_cfg = CONFIG["LIVEKIT"]
                 body = json.dumps({
                     "url": _display_livekit_url,
                     "token": token,
+                    "browser_audio": not lk_cfg["play_local_audio"],
                 }).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -289,11 +291,12 @@ class TarsLiveKitClient:
 
         set_tars_state(TarsState.STANDBY)
 
-        # Publish mic (Python SDK)
+        # Publish mic (Python SDK — always, browser can't reliably access mic)
         await self._start_mic()
 
-        # Set up audio output (Python SDK)
-        await self._start_audio_output()
+        # Audio output: Python SDK (play_local_audio=true) or browser (false)
+        if self._play_local_audio:
+            await self._start_audio_output()
 
         # Register RPC handlers
         self._register_rpc_handlers()
@@ -395,8 +398,8 @@ class TarsLiveKitClient:
             )
 
             if track.kind == _rtc.TrackKind.KIND_AUDIO:
-                # Route agent audio to local speaker via Python SDK
-                if self._audio_player is not None:
+                # Python audio mode: route to local speaker
+                if self._play_local_audio and self._audio_player is not None:
                     async def _add_and_start(t, player):
                         await player.add_track(t)
                         try:
@@ -407,7 +410,11 @@ class TarsLiveKitClient:
                         _add_and_start(track, self._audio_player)
                     )
                     queue_message(
-                        f"LIVEKIT: Audio from {participant.identity} → speaker"
+                        f"LIVEKIT: Audio from {participant.identity} → speaker (Python)"
+                    )
+                else:
+                    queue_message(
+                        f"LIVEKIT: Audio from {participant.identity} → browser"
                     )
                 set_tars_state(TarsState.TALKING)
 

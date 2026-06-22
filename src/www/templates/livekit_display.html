@@ -65,19 +65,22 @@ video {
 const container = document.getElementById('video-container');
 const status = document.getElementById('status');
 
+let browserAudio = false;
+
 async function start() {
     status.textContent = 'Fetching token...';
     const resp = await fetch('/livekit-token');
-    const { url, token } = await resp.json();
+    const data = await resp.json();
+    const { url, token } = data;
+    browserAudio = data.browser_audio || false;
 
-    status.textContent = 'Connecting to room...';
+    status.textContent = 'Connecting... (audio: ' + (browserAudio ? 'browser' : 'python') + ')';
 
     const room = new LivekitClient.Room({
         adaptiveStream: true,
         dynacast: false,
     });
 
-    // Video only — audio handled by Python SDK
     room.on(LivekitClient.RoomEvent.TrackSubscribed, (track, publication, participant) => {
         if (track.kind === LivekitClient.Track.Kind.Video) {
             const el = track.attach();
@@ -87,6 +90,16 @@ async function start() {
             el.muted = true;
             container.appendChild(el);
             status.textContent = 'Video: ' + participant.identity;
+        } else if (track.kind === LivekitClient.Track.Kind.Audio && browserAudio) {
+            const el = track.attach();
+            el.autoplay = true;
+            el.volume = 1.0;
+            document.body.appendChild(el);
+            el.play().then(() => {
+                status.textContent += ' | Audio: ' + participant.identity;
+            }).catch(err => {
+                status.textContent += ' | Audio ERR: ' + err.message;
+            });
         }
     });
 
