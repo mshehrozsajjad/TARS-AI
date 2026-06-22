@@ -23,9 +23,7 @@ from livekit.agents import (
     Agent,
     RunContext,
     function_tool,
-    RpcInvocationData,
     inference,
-    room_io,
 )
 
 load_dotenv()
@@ -199,12 +197,12 @@ server = AgentServer()
 async def tars_session(ctx: agents.JobContext):
     """Called when a room is created — starts a TARS agent session."""
 
+    voice_id = os.getenv("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb")
     session = AgentSession(
         stt=inference.STT(model="deepgram/nova-3", language="en"),
         llm=inference.LLM(model="openai/gpt-4o-mini"),
         tts=inference.TTS(
-            model="elevenlabs/eleven_multilingual_v2",
-            voice=os.getenv("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb"),
+            model=f"elevenlabs/eleven_multilingual_v2:{voice_id}",
         ),
     )
 
