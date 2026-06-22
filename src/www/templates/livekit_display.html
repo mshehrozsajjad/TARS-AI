@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TARS</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+#video-container {
+    width: 100vw;
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #000;
+}
+video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+/* Rotate the entire page 270deg to match TARS screen orientation */
+body {
+    transform: rotate(270deg);
+    transform-origin: center center;
+    width: 100vh;
+    height: 100vw;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    margin-top: calc(-50vw);
+    margin-left: calc(-50vh);
+}
+</style>
+</head>
+<body>
+<div id="video-container"></div>
+
+<script src="https://cdn.livekit.io/livekit-client/dist/livekit-client.umd.js"></script>
+<script>
+const container = document.getElementById('video-container');
+
+async function start() {
+    // Fetch connection info from the local Python server
+    const resp = await fetch('/livekit-token');
+    const { url, token } = await resp.json();
+
+    const room = new LivekitClient.Room({
+        adaptiveStream: true,
+        dynacast: false,
+    });
+
+    room.on(LivekitClient.RoomEvent.TrackSubscribed, (track, publication, participant) => {
+        if (track.kind === LivekitClient.Track.Kind.Video) {
+            const el = track.attach();
+            el.style.width = '100%';
+            el.style.height = '100%';
+            el.style.objectFit = 'cover';
+            container.appendChild(el);
+        }
+    });
+
+    room.on(LivekitClient.RoomEvent.TrackUnsubscribed, (track) => {
+        track.detach().forEach(el => el.remove());
+    });
+
+    room.on(LivekitClient.RoomEvent.Disconnected, () => {
+        // Reconnect after a short delay
+        setTimeout(start, 3000);
+    });
+
+    await room.connect(url, token);
+}
+
+// Auto-start, retry on failure
+(async function init() {
+    while (true) {
+        try {
+            await start();
+            break;
+        } catch (e) {
+            console.error('Connection failed, retrying in 3s...', e);
+            await new Promise(r => setTimeout(r, 3000));
+        }
+    }
+})();
+</script>
+</body>
+</html>

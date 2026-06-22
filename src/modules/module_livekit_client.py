@@ -20,8 +20,6 @@ import json
 import asyncio
 import threading
 import time
-import numpy as np
-
 from modules.module_config import load_config
 from modules.module_messageQue import queue_message
 from modules.module_state import set_tars_state, TarsState
@@ -29,136 +27,117 @@ from modules.module_state import set_tars_state, TarsState
 CONFIG = load_config()
 
 
-# ── Pygame video display ─────────────────────────────────────────────
+# ── Browser-based video display ──────────────────────────────────────
 
-class LiveKitDisplay:
-    """Lightweight video display for Pi — writes directly to framebuffer.
+_display_server_started = False
+_display_room_name = None
+_display_livekit_url = None
+_browser_process = None
 
-    Falls back to Pygame if framebuffer isn't available.
-    Throttles to ~10fps to keep CPU usage minimal on Pi4.
-    """
 
-    def __init__(self):
-        self._frame_bytes = None
-        self._frame_lock = threading.Lock()
-        self._running = False
-        self._thread = None
+def _start_display_server(livekit_url, room_name, port=8888):
+    """Start a tiny HTTP server that serves the video display page
+    and a /livekit-token endpoint. Launches Chromium in kiosk mode."""
+    global _display_server_started, _display_room_name, _display_livekit_url
+    global _browser_process
 
-        ui_cfg = CONFIG.get("UI", {})
-        self._fullscreen = ui_cfg.get("fullscreen", True)
-        self._target_fps = 10
-        # Actual resolution detected at render_loop start
+    if _display_server_started:
+        # Update room name for new sessions
+        _display_room_name = room_name
+        return
 
-    def start(self):
-        if self._running:
-            return
-        self._running = True
-        self._thread = threading.Thread(
-            target=self._render_loop,
-            name="LiveKitDisplay",
-            daemon=True,
+    _display_livekit_url = livekit_url
+    _display_room_name = room_name
+
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    import subprocess
+
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    template_path = os.path.join(base_dir, "www", "templates", "livekit_display.html")
+
+    with open(template_path, "r") as f:
+        html_content = f.read()
+
+    class DisplayHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/livekit-token":
+                # Generate a view-only token for the browser
+                token = _generate_token(
+                    _display_room_name, "tars-display"
+                )
+                body = json.dumps({
+                    "url": _display_livekit_url,
+                    "token": token,
+                }).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif self.path in ("/", "/livekit-display"):
+                body = html_content.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, format, *args):
+            pass  # silence request logs
+
+    server = HTTPServer(("127.0.0.1", port), DisplayHandler)
+
+    def _serve():
+        queue_message(f"LIVEKIT: Display server on http://127.0.0.1:{port}")
+        server.serve_forever()
+
+    t = threading.Thread(target=_serve, name="LiveKitDisplayServer", daemon=True)
+    t.start()
+    _display_server_started = True
+
+    # Give the server a moment to bind
+    time.sleep(0.5)
+
+    # Launch Chromium in kiosk mode — fullscreen, no UI chrome
+    try:
+        _browser_process = subprocess.Popen(
+            [
+                "chromium-browser",
+                "--kiosk",
+                "--noerrdialogs",
+                "--disable-infobars",
+                "--disable-session-crashed-bubble",
+                "--autoplay-policy=no-user-gesture-required",
+                "--check-for-update-interval=31536000",
+                "--disable-features=TranslateUI",
+                "--no-first-run",
+                f"http://127.0.0.1:{port}/livekit-display",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
-        self._thread.start()
+        queue_message("LIVEKIT: Chromium kiosk launched for video display")
+    except FileNotFoundError:
+        queue_message("WARNING: chromium-browser not found — video display unavailable")
 
-    def stop(self):
-        self._running = False
-        if self._thread:
-            self._thread.join(timeout=3)
 
-    def set_frame(self, rgba_array):
-        """Accept RGBA numpy array — do minimal work here (async thread)."""
-        # Only store raw bytes — all heavy work happens in render thread
-        with self._frame_lock:
-            self._frame_bytes = rgba_array
+def _stop_display():
+    """Kill the browser process on shutdown."""
+    global _browser_process
+    if _browser_process is not None:
+        try:
+            _browser_process.terminate()
+            _browser_process.wait(timeout=3)
+        except Exception:
+            try:
+                _browser_process.kill()
+            except Exception:
+                pass
+        _browser_process = None
 
-    def _render_loop(self):
-        """Render loop — uses Pygame with minimal transforms."""
-        # Prevent SDL from touching audio
-        old_drv = os.environ.get("SDL_AUDIODRIVER")
-        os.environ["SDL_AUDIODRIVER"] = "dummy"
-
-        import pygame
-        pygame.display.init()
-
-        if old_drv is None:
-            os.environ.pop("SDL_AUDIODRIVER", None)
-        else:
-            os.environ["SDL_AUDIODRIVER"] = old_drv
-
-        # Auto-detect actual screen resolution
-        info = pygame.display.Info()
-        display_w = info.current_w   # e.g. 800 (hardware landscape)
-        display_h = info.current_h   # e.g. 480
-
-        # Screen is physically rotated on TARS — logical view is portrait
-        # Logical surface: portrait (480 x 800), rotated 270° onto (800 x 480)
-        logical_w = display_h   # 480
-        logical_h = display_w   # 800
-
-        flags = pygame.FULLSCREEN | pygame.NOFRAME if self._fullscreen else 0
-        screen = pygame.display.set_mode((display_w, display_h), flags)
-        pygame.mouse.set_visible(False)
-        screen.fill((0, 0, 0))
-        pygame.display.flip()
-
-        queue_message(f"LIVEKIT: Display ready hw={display_w}x{display_h}, "
-                      f"logical={logical_w}x{logical_h}, rotate=270, "
-                      f"{self._target_fps}fps")
-
-        frame_interval = 1.0 / self._target_fps
-        last_frame = None
-
-        while self._running:
-            t0 = time.monotonic()
-
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    self._running = False
-
-            with self._frame_lock:
-                new_frame = self._frame_bytes
-                self._frame_bytes = None
-
-            if new_frame is not None:
-                last_frame = new_frame
-
-            if last_frame is not None:
-                try:
-                    h, w = last_frame.shape[:2]
-                    rgb = np.ascontiguousarray(last_frame[:, :, :3])
-                    surface = pygame.image.frombuffer(
-                        rgb.data, (w, h), "RGB"
-                    )
-
-                    # Scale avatar to fill the portrait logical surface
-                    # Use max scale to fill (crop overflow), not min (letterbox)
-                    scale = max(logical_w / w, logical_h / h)
-                    new_w = int(w * scale)
-                    new_h = int(h * scale)
-                    scaled = pygame.transform.scale(surface, (new_w, new_h))
-
-                    # Center-crop to logical size
-                    crop_x = (new_w - logical_w) // 2
-                    crop_y = (new_h - logical_h) // 2
-                    composed = screen.copy()
-                    composed.fill((0, 0, 0))
-                    # Blit onto a logical-sized surface, then rotate
-                    logical_surf = pygame.Surface((logical_w, logical_h))
-                    logical_surf.blit(scaled, (-crop_x, -crop_y))
-
-                    # Rotate 270° to match physical screen orientation
-                    rotated = pygame.transform.rotate(logical_surf, 270)
-                    screen.blit(rotated, (0, 0))
-                    pygame.display.flip()
-                except Exception:
-                    pass
-
-            elapsed = time.monotonic() - t0
-            sleep_time = frame_interval - elapsed
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-
-        pygame.quit()
 
 # ── Lazy SDK import ──────────────────────────────────────────────────
 
@@ -240,10 +219,6 @@ class TarsLiveKitClient:
         self._mic_input = None
         self._mic_track = None
         self._audio_player = None
-        self._video_stream = None
-
-        # Video display — started lazily when first video track arrives
-        self._display = LiveKitDisplay()
 
         # Config
         lk_cfg = CONFIG["LIVEKIT"]
@@ -316,22 +291,17 @@ class TarsLiveKitClient:
         # Register RPC handlers
         self._register_rpc_handlers()
 
+        # Launch browser for video display
+        _start_display_server(self._livekit_url, self._room_name)
+
         queue_message("LIVEKIT: Client fully initialized — mic publishing, "
-                      "audio output ready, RPCs registered")
+                      "audio output ready, RPCs registered, video in browser")
 
     async def disconnect(self):
         """Disconnect from the room and clean up."""
         self._shutdown.set()
 
-        if self._display is not None:
-            self._display.stop()
-
-        if self._video_stream is not None:
-            try:
-                self._video_stream.close()
-            except Exception:
-                pass
-            self._video_stream = None
+        _stop_display()
 
         if self._audio_player is not None:
             try:
@@ -419,40 +389,6 @@ class TarsLiveKitClient:
         )
         queue_message("LIVEKIT: Audio output device opened")
 
-    # ── Video receive (agent → Pygame display) ───────────────────
-
-    async def _handle_video_track(self, track):
-        """Receive video frames from agent — throttled to ~10fps."""
-        stream = _rtc.VideoStream(track)
-        self._video_stream = stream
-
-        if not self._display._running:
-            self._display.start()
-
-        queue_message("LIVEKIT: Receiving agent video stream → display")
-
-        # Only process ~10 frames per second — drop the rest
-        min_interval = 1.0 / 12  # slightly above display fps
-        last_time = 0.0
-
-        async for frame_event in stream:
-            if self._shutdown.is_set():
-                break
-
-            now = time.monotonic()
-            if now - last_time < min_interval:
-                continue  # skip this frame
-            last_time = now
-
-            frame = frame_event.frame
-            rgba_frame = frame.convert(_rtc.VideoBufferType.RGBA)
-            frame_data = np.frombuffer(rgba_frame.data, dtype=np.uint8)
-            frame_data = frame_data.reshape(
-                (rgba_frame.height, rgba_frame.width, 4)
-            )
-
-            self._display.set_frame(frame_data)
-
     # ── Room event handlers ──────────────────────────────────────
 
     def _register_room_events(self):
@@ -486,9 +422,7 @@ class TarsLiveKitClient:
                     )
                 set_tars_state(TarsState.TALKING)
 
-            elif track.kind == _rtc.TrackKind.KIND_VIDEO:
-                # Route agent video to Pygame display
-                asyncio.ensure_future(self._handle_video_track(track))
+            # Video tracks are handled by Chromium browser display
 
         @self._room.on("track_unsubscribed")
         def on_track_unsubscribed(
