@@ -42,30 +42,41 @@ DEVICE_INFO = CONFIG.get("_device", {})
 RASPBERRY_VERSION = DEVICE_INFO.get("raspberry_version", "pi5")
 USE_LITE_MEMORY = should_use_lite_memory(CONFIG)
 
+# Detect LiveKit mode early — skips loading STT/TTS/LLM/ChatUI
+LIVEKIT_MODE = CONFIG.get("LIVEKIT", {}).get("conversation_mode", "standard") == "livekit"
+
 queue_message(f"LOAD: TARS-AI starting on {RASPBERRY_VERSION.upper()}")
 
 # === Import Modules ===
-from modules.module_character import CharacterManager
-from modules.module_tts import update_tts_settings
-from modules.module_llm import initialize_manager_llm
-from modules.module_skills import initialize_skills
-from modules.module_stt import STTManager
 from modules.module_state import set_tars_state, on_state_change, TarsState, register_stt_manager
-from modules.module_main import (
-    initialize_managers,
-    wake_word_callback,
-    utterance_callback,
-    post_utterance_callback,
-    start_bt_controller_thread,
-    startup_initialization
-)
-from modules.module_llm import process_completion
+
+if LIVEKIT_MODE:
+    # LiveKit mode: only need state, servos, battery — no STT/TTS/LLM
+    queue_message("LOAD: LiveKit mode — skipping STT/TTS/LLM/ChatUI imports")
+    from modules.module_main import startup_initialization, start_bt_controller_thread
+    from modules.module_skills import initialize_skills
+else:
+    from modules.module_character import CharacterManager
+    from modules.module_tts import update_tts_settings
+    from modules.module_llm import initialize_manager_llm
+    from modules.module_skills import initialize_skills
+    from modules.module_stt import STTManager
+    from modules.module_main import (
+        initialize_managers,
+        wake_word_callback,
+        utterance_callback,
+        post_utterance_callback,
+        start_bt_controller_thread,
+        startup_initialization
+    )
+    from modules.module_llm import process_completion
 
 # === Conditional Memory Manager Import ===
-if USE_LITE_MEMORY:
-    from modules.module_memory_lite import MemoryManagerLite as MemoryManager
-else:
-    from modules.module_memory import MemoryManager
+if not LIVEKIT_MODE:
+    if USE_LITE_MEMORY:
+        from modules.module_memory_lite import MemoryManagerLite as MemoryManager
+    else:
+        from modules.module_memory import MemoryManager
 
 # === Conditional Vision Import ===
 VISION_AVAILABLE = False
@@ -101,7 +112,7 @@ if CONFIG["UI"]["UI_enabled"]:
 
 # === Conditional ChatUI Import ===
 CHATUI_AVAILABLE = False
-if CONFIG['ACCESS']['webui_enabled']:
+if CONFIG['ACCESS']['webui_enabled'] and not LIVEKIT_MODE:
     try:
         import modules.module_chatui
         CHATUI_AVAILABLE = True
@@ -326,6 +337,67 @@ if __name__ == "__main__":
             queue_message("LOAD: UI disabled in config")
 
     ui_manager.update_data("System", "Initializing application...", "LOAD")
+
+    # ══════════════════════════════════════════════════════════════
+    # LIVEKIT MODE — Pi is a lightweight RTC client, agent runs
+    # on LiveKit Cloud. No STT/TTS/LLM on Pi.
+    # ══════════════════════════════════════════════════════════════
+    if LIVEKIT_MODE:
+        queue_message("LOAD: === LIVEKIT MODE ===")
+
+        # Servo initialization (needed for RPC movement commands)
+        startup_initialization()
+
+        # Idle fidgets (body autopilot)
+        try:
+            from modules.module_gestures import start_idle_fidgets
+            start_idle_fidgets()
+        except Exception as e:
+            queue_message(f"WARNING: Idle fidgets not available: {e}")
+
+        # Body state (unified nervous system)
+        body_state_manager = None
+        try:
+            from modules.module_body_state import BodyStateManager
+            body_state_manager = BodyStateManager(config=CONFIG, battery_module=battery)
+        except Exception as e:
+            queue_message(f"WARNING: Body state system not available: {e}")
+
+        # Start LiveKit client in a daemon thread
+        from modules.module_livekit_client import start_livekit_client
+        livekit_thread = threading.Thread(
+            target=start_livekit_client,
+            kwargs={
+                'ui_manager': ui_manager,
+                'shutdown_event': shutdown_event,
+            },
+            name="LiveKitClientThread",
+            daemon=True,
+        )
+        livekit_thread.start()
+
+        queue_message(f"LOAD: TARS-AI OS: {VERSION} (LiveKit) on {RASPBERRY_VERSION.upper()}")
+        ui_manager.update_data("System", f"TARS-AI OS: {VERSION} LiveKit mode", "SYSTEM")
+
+        # Main loop — wait for shutdown
+        try:
+            while not shutdown_event.is_set():
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            ui_manager.update_data("System", "Shutting down...", "SYSTEM")
+            queue_message("INFO: Stopping all threads...")
+            shutdown_event.set()
+        finally:
+            from modules.module_livekit_client import stop_livekit_client
+            stop_livekit_client()
+            if battery is not None:
+                battery.stop()
+            queue_message("INFO: Shutdown complete.")
+            os._exit(0)
+
+    # ══════════════════════════════════════════════════════════════
+    # STANDARD MODE — full STT → LLM → TTS pipeline on Pi
+    # ══════════════════════════════════════════════════════════════
 
     # === Character and Memory Managers ===
     char_manager = CharacterManager(config=CONFIG)

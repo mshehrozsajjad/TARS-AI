@@ -76,6 +76,25 @@ vad_prefix_ms = 200
 # Context window compression trigger in tokens (higher = more context retained)
 context_trigger_tokens = 32000
 
+[LIVEKIT]
+# Conversation mode: standard (not used) | livekit (Pi becomes LiveKit RTC client)
+# When livekit: Pi publishes mic + camera, receives agent audio/video, handles RPCs.
+# Agent runs on LiveKit Cloud — no STT/LLM/TTS on Pi.
+conversation_mode = standard
+# LiveKit Cloud room name — agent and Pi join the same room
+room_name = tars-room
+# Pi's participant identity in the room (agent uses this to target RPCs)
+participant_identity = tars-pi
+# Publish Pi camera as video track (True/False)
+publish_camera = True
+# Camera video FPS — keep low on Pi4 (3–10)
+camera_fps = 5
+# Camera video resolution
+camera_width = 640
+camera_height = 480
+# Play agent's audio response on Pi's physical speaker (True/False)
+play_local_audio = True
+
 [STT]
 # Spoken language (use openai stt_processor for non-English)
 language = english
