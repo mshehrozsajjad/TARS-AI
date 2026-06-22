@@ -253,12 +253,7 @@ class TarsLiveKitClient:
         room_prefix = self._room_name
         self._room_name = f"{room_prefix}-{uuid.uuid4().hex[:8]}"
 
-        # Don't auto-subscribe — browser handles all incoming audio/video
-        self._room = _rtc.Room(
-            room_options=_rtc.RoomOptions(
-                auto_subscribe=False,
-            ),
-        )
+        self._room = _rtc.Room()
         token = _generate_token(self._room_name, self._identity)
 
         self._register_room_events()
@@ -266,7 +261,11 @@ class TarsLiveKitClient:
         queue_message(f"LIVEKIT: Connecting to {self._livekit_url} "
                       f"room={self._room_name} as {self._identity}")
 
-        await self._room.connect(self._livekit_url, token)
+        # Don't auto-subscribe — browser handles all incoming audio/video
+        await self._room.connect(
+            self._livekit_url, token,
+            options=_rtc.RoomOptions(auto_subscribe=False),
+        )
         self._connected = True
         queue_message("LIVEKIT: Connected to room")
 
