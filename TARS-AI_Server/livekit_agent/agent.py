@@ -197,7 +197,7 @@ server = AgentServer()
 async def tars_session(ctx: agents.JobContext):
     """Called when a room is created — starts a TARS agent session."""
 
-    voice_id = os.getenv("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb")
+    voice_id = os.getenv("ELEVENLABS_VOICE_ID", "NpFqhOmVs00E5GaaYrtI")
     session = AgentSession(
         stt=inference.STT(model="deepgram/nova-3", language="en"),
         llm=inference.LLM(model="openai/gpt-4o-mini"),

@@ -245,13 +245,43 @@ class TarsLiveKitClient:
     # ── Audio output (agent → speaker) ───────────────────────────
 
     async def _start_audio_output(self):
-        """Set up speaker output with AEC linked to mic input."""
+        """Set up speaker output on the correct hardware device."""
+        import sounddevice as sd
+
+        # Find the real USB audio output (same logic as module_tts)
+        output_idx = None
+        try:
+            devices = sd.query_devices()
+            for i, dev in enumerate(devices):
+                if dev.get("max_output_channels", 0) < 1:
+                    continue
+                name = dev.get("name", "").lower()
+                if "hdmi" in name:
+                    continue
+                if "usb" in name:
+                    output_idx = i
+                    queue_message(f"LIVEKIT: Audio output → {dev['name']} (device {i})")
+                    break
+            if output_idx is None:
+                # Fall back to first non-virtual hardware device
+                for i, dev in enumerate(devices):
+                    if dev.get("max_output_channels", 0) < 1:
+                        continue
+                    name = dev.get("name", "").lower()
+                    if "default" not in name and "dmix" not in name and "sysdefault" not in name and "hdmi" not in name:
+                        output_idx = i
+                        queue_message(f"LIVEKIT: Audio output → {dev['name']} (device {i})")
+                        break
+        except Exception as e:
+            queue_message(f"LIVEKIT: Could not enumerate audio devices — {e}")
+
         # Pass the mic's APM for echo cancellation
         apm = self._mic_input.apm if self._mic_input else None
         delay = self._mic_input.delay_estimator if self._mic_input else None
         self._audio_player = _rtc.media_devices.OutputPlayer(
             apm_for_reverse=apm,
             delay_estimator=delay,
+            output_device=output_idx,
         )
         queue_message("LIVEKIT: Audio output device opened")
 
