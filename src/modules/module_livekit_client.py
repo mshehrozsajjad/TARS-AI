@@ -113,7 +113,7 @@ def _start_display_server(livekit_url, room_name, port=8888):
         _browser_process = subprocess.Popen(
             [
                 chromium_bin,
-                # "--kiosk",  # TODO: enable once video display is finalized
+                "--kiosk",  # TODO: enable once video display is finalized
                 "--noerrdialogs",
                 "--disable-infobars",
                 "--disable-session-crashed-bubble",
