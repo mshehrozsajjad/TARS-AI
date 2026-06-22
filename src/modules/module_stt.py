@@ -82,6 +82,15 @@ if CAPABILITIES is None or (CAPABILITIES.allowed_wake and "atomik" in CAPABILITI
     except ImportError:
         pass
 
+# openWakeWord (Pi5, Pi4, Pi3)
+oww_Model = None
+if CAPABILITIES is None or (CAPABILITIES.allowed_wake and "openwakeword" in CAPABILITIES.allowed_wake):
+    try:
+        from openwakeword.model import Model as _oww_Model
+        oww_Model = _oww_Model
+    except ImportError:
+        pass
+
 # Sherpa-ONNX (Pi5, Pi4, or any profile using it for VAD/denoising)
 if CAPABILITIES is None or (
     (CAPABILITIES.allowed_stt and "sherpa-onnx" in CAPABILITIES.allowed_stt) or
@@ -199,6 +208,7 @@ class STTManager:
         self.sherpa_recognizer = None
         self.sherpa_vad = None
         self.sherpa_denoiser = None
+        self.oww_model = None
         self.sherpa_punctuator = None
         # Smart Turn semantic turn detection
         self.smart_turn_session = None
@@ -265,6 +275,8 @@ class STTManager:
             self._load_fastrtc_model()
         elif wake_proc == "atomik":
             self._load_atomik_model()
+        elif wake_proc == "openwakeword":
+            self._load_openwakeword_model()
         elif wake_proc == "sherpa-onnx" and not self.sherpa_recognizer:
             self._load_sherpa_onnx_model()
 
@@ -330,6 +342,37 @@ class STTManager:
         atomik_mode = CONFIG['STT'].get('atomik_mode', 'auto').strip().lower()
         mode = None if atomik_mode == 'auto' else atomik_mode
         WakeWordSystem(self.WAKE_WORD, mode=mode).createModel()
+
+    def _load_openwakeword_model(self):
+        """Load openWakeWord model for streaming wake word detection."""
+        if oww_Model is None:
+            queue_message("WARNING: openWakeWord not available (not installed — pip install openwakeword)")
+            return
+        try:
+            oww_model_name = CONFIG['STT'].get('oww_model_name', '').strip()
+            model_paths = []
+
+            if oww_model_name:
+                # Check if it's a file path to a custom model in src/stt/
+                custom_path = os.path.join(_stt_dir(), oww_model_name)
+                if os.path.isfile(custom_path):
+                    model_paths = [custom_path]
+                elif os.path.isfile(oww_model_name):
+                    model_paths = [oww_model_name]
+                else:
+                    # Treat as a pre-trained model name (e.g. "hey_jarvis_v0.1")
+                    model_paths = [oww_model_name]
+
+            # Use ONNX runtime since the project already depends on onnxruntime
+            self.oww_model = oww_Model(
+                wakeword_models=model_paths,
+                inference_framework="onnx",
+            )
+            loaded = list(self.oww_model.prediction_buffer.keys())
+            queue_message(f"INFO: openWakeWord loaded successfully. Models: {loaded}")
+        except Exception as e:
+            queue_message(f"ERROR: Failed to load openWakeWord model: {e}")
+            self.oww_model = None
 
     def _load_silero_model(self):
         """Load Silero STT model via Torch Hub into the stt folder."""
@@ -1382,6 +1425,7 @@ class STTManager:
         processors = {
             "fastrtc": self._detect_wake_word_fastrtc,
             "sherpa-onnx": self._detect_wake_word_sherpa_onnx,
+            "openwakeword": self._detect_wake_word_openwakeword,
         }
         wake_proc = self.config["STT"].get("wake_word_processor", "atomik")
         return processors.get(wake_proc, self._detect_wake_word_atomik)()
@@ -1603,6 +1647,90 @@ class STTManager:
             return False
 
         # InputStream is now closed — safe to play audio via sd.play
+        if wake_detected:
+            self._handle_wake_detected()
+            return True
+        return False
+
+    def _detect_wake_word_openwakeword(self) -> bool:
+        """Detect wake word using openWakeWord streaming prediction."""
+        if not self.oww_model:
+            queue_message("ERROR: openWakeWord model not loaded for wake word detection.")
+            return False
+
+        self._fire_and_forget_get(f"http://127.0.0.1:{self._webui_port}/stop_talking")
+
+        # Transcript verify gate
+        transcript_verify_fn = None
+        stt_cfg = CONFIG.get('STT', {})
+        if stt_cfg.get('vad_transcript_verify', 'False').strip() == 'True':
+            transcript_verify_fn = self._build_transcript_verify_fn()
+
+        # Map sensitivity 1-10 to threshold: sens 1 → 0.80, sens 10 → 0.30
+        sensitivity = max(1, min(10, int(CONFIG["STT"]["sensitivity"])))
+        norm = (sensitivity - 1) / 9.0
+        threshold = round(max(0.30, 0.80 - norm * 0.50), 2)
+
+        RATE = self.MODEL_RATE
+        # openWakeWord works best with 1280-sample chunks (80ms at 16kHz)
+        chunk_size = 1280
+        wake_detected = False
+
+        # Reset model buffers for a fresh detection session
+        self.oww_model.reset()
+
+        try:
+          with ResamplingInputStream(dtype="int16") as mic:
+            # Flush stale mic audio after TTS playback
+            try:
+                from modules.module_tts import needs_mic_flush, clear_mic_flush
+                if needs_mic_flush():
+                    queue_message("DEBUG: Flushing mic audio after TTS playback")
+                    mic.flush()
+                    clear_mic_flush()
+            except Exception:
+                pass
+
+            while self.running and not self.shutdown_event.is_set():
+                if self.is_paused():
+                    break
+                if is_tts_playing():
+                    break
+
+                data, _ = mic.read(chunk_size)
+                data = self.amplify_audio(data)
+
+                # RMS silence gate — skip prediction when quiet to save CPU
+                if self._is_quiet(data):
+                    continue
+
+                # openWakeWord expects int16 numpy array
+                audio_chunk = data.flatten().astype(np.int16)
+                prediction = self.oww_model.predict(audio_chunk)
+
+                # Check each model's score against threshold
+                for model_name, score in prediction.items():
+                    if score >= threshold:
+                        if self.DEBUG:
+                            queue_message(f"DEBUG: openWakeWord '{model_name}' score={score:.3f} (threshold={threshold})")
+
+                        # Build float32 audio window for wake gates (~2s of recent audio)
+                        audio_window = audio_chunk.astype(np.float32) / 32768.0
+                        if not self._run_wake_gates(audio_window, transcript_verify_fn=transcript_verify_fn):
+                            self.oww_model.reset()
+                            continue
+
+                        wake_detected = True
+                        break
+
+                if wake_detected:
+                    break
+
+        except sd.PortAudioError as e:
+            queue_message(f"WARNING: Audio device error in wake word detection, retrying in 2s: {e}")
+            time.sleep(2)
+            return False
+
         if wake_detected:
             self._handle_wake_detected()
             return True

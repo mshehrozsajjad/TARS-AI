@@ -61,7 +61,7 @@ DEVICE_PROFILES: Dict[DeviceProfile, DeviceCapabilities] = {
         allowed_stt={"fastrtc", "silero", "openai", "external", "sherpa-onnx", "gladia", "deepgram"},
         allowed_tts={"espeak", "piper", "silero", "elevenlabs", "openai", "other", "external"},
         allowed_vad={"silero", "rms", "sherpa-onnx", "smart-turn"},
-        allowed_wake={"fastrtc", "atomik", "sherpa-onnx"},
+        allowed_wake={"fastrtc", "atomik", "sherpa-onnx", "openwakeword"},
         can_use_embeddings=True,
         can_use_ui=True,
         can_use_vision=True,
@@ -79,7 +79,7 @@ DEVICE_PROFILES: Dict[DeviceProfile, DeviceCapabilities] = {
         allowed_stt={"openai", "external", "sherpa-onnx", "gladia", "deepgram"},
         allowed_tts={"espeak", "piper", "elevenlabs", "openai", "other", "external"},
         allowed_vad={"silero", "rms", "sherpa-onnx", "smart-turn"},
-        allowed_wake={"atomik", "sherpa-onnx"},
+        allowed_wake={"atomik", "sherpa-onnx", "openwakeword"},
         can_use_embeddings=True,
         can_use_ui=True,
         can_use_vision=False,
@@ -97,7 +97,7 @@ DEVICE_PROFILES: Dict[DeviceProfile, DeviceCapabilities] = {
         allowed_stt={"openai", "external", "gladia", "deepgram"},
         allowed_tts={"espeak", "elevenlabs", "openai", "other", "external"},
         allowed_vad={"rms", "sherpa-onnx", "silero"},
-        allowed_wake={"atomik", "sherpa-onnx"},
+        allowed_wake={"atomik", "sherpa-onnx", "openwakeword"},
         can_use_embeddings=False,
         can_use_ui=True,
         can_use_vision=False,
@@ -426,6 +426,7 @@ def load_config():
             "wake_word": config['STT']['wake_word'],
             "wake_word_processor": config['STT']['wake_word_processor'],
             "atomik_mode": config.get('STT', 'atomik_mode', fallback='auto'),
+            "oww_model_name": config.get('STT', 'oww_model_name', fallback=''),
             "sensitivity": config['STT']['sensitivity'],
             "vad_transcript_verify": config.get('STT', 'vad_transcript_verify', fallback='False'),
             "vad_presence_gate": config.get('STT', 'vad_presence_gate', fallback='off'),
@@ -820,8 +821,8 @@ CONFIG_METADATA = {
         'wake_word_processor': {
             'group': 'wake_word',
             'label': 'Wake Word Engine',
-            'options': ['atomik', 'fastrtc', 'sherpa-onnx'],
-            'description': '"atomik" is built into TARS, works offline, and is the recommended choice. "sherpa-onnx" transcribes audio and matches the wake word offline (Pi5/Pi4). "fastrtc" uses an internet-based service for detection.'
+            'options': ['atomik', 'openwakeword', 'fastrtc', 'sherpa-onnx'],
+            'description': '"atomik" is built into TARS, works offline, and is the recommended choice. "openwakeword" uses pre-trained neural network models from the openWakeWord project — lightweight, offline, and supports custom models. "sherpa-onnx" transcribes audio and matches the wake word offline (Pi5/Pi4). "fastrtc" uses an internet-based service for detection.'
         },
         'atomik_mode': {
             'group': 'wake_word',
@@ -829,6 +830,12 @@ CONFIG_METADATA = {
             'depends_on': [{'field': 'wake_word_processor', 'values': ['atomik']}],
             'options': ['auto', 'model', 'template'],
             'description': '"auto" uses the ONNX model if available, otherwise falls back to template matching. "model" requires a trained ONNX model (created with the wakeword-trainer tool). "template" records your wake word 5 times on-device and matches by cosine similarity — easiest to set up.'
+        },
+        'oww_model_name': {
+            'group': 'wake_word',
+            'label': 'openWakeWord Model',
+            'depends_on': [{'field': 'wake_word_processor', 'values': ['openwakeword']}],
+            'description': 'The openWakeWord model to use for detection. Use a pre-trained name like "hey_jarvis_v0.1" or "alexa_v0.1", or a path to a custom .tflite/.onnx model file inside the stt/ folder. Leave blank to load all available pre-trained models. See the openWakeWord GitHub for available model names.'
         },
         'sensitivity': {
             'group': 'wake_word',
