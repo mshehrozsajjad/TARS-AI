@@ -244,6 +244,12 @@ async def tars_session(ctx: agents.JobContext):
             voice_id=ELEVENLABS_VOICE_ID,
             model=ELEVENLABS_MODEL,
         ),
+        turn_handling={
+            # Wider endpointing — don't cut off the user mid-pause
+            "endpointing": {"min_delay": 0.7, "max_delay": 1.0},
+            # Don't interrupt TARS while speaking
+            "interruption": {"enabled": False},
+        },
     )
 
     # Start avatar BEFORE session (order matters — see examlingo notes)
