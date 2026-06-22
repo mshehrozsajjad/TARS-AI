@@ -96,14 +96,16 @@ class TarsLiveKitClient:
     def __init__(self, ui_manager=None):
         _ensure_sdk()
 
-        self._room = _rtc.Room()
+        # Room created in connect() — needs an active event loop
+        self._room = None
         self._ui_manager = ui_manager
         self._connected = False
         self._shutdown = threading.Event()
 
         # Track references
+        self._media_devices = None
+        self._mic_input = None
         self._mic_track = None
-        self._mic_source = None
         self._audio_player = None
         self._video_stream = None
 
@@ -124,6 +126,9 @@ class TarsLiveKitClient:
                 "LIVEKIT_URL must be set in .env"
             )
 
+        # Create room inside async context (requires active event loop)
+        self._room = _rtc.Room()
+
         token = _generate_token(self._room_name, self._identity)
 
         # Register event handlers before connecting
@@ -143,7 +148,7 @@ class TarsLiveKitClient:
 
         # Set up audio output for receiving agent audio
         if self._play_local_audio:
-            self._start_audio_output()
+            await self._start_audio_output()
 
         # Register RPC handlers
         self._register_rpc_handlers()
@@ -164,17 +169,17 @@ class TarsLiveKitClient:
 
         if self._audio_player is not None:
             try:
-                await self._audio_player.close()
+                await self._audio_player.aclose()
             except Exception:
                 pass
             self._audio_player = None
 
-        if self._mic_source is not None:
+        if self._mic_input is not None:
             try:
-                await self._mic_source.aclose()
+                await self._mic_input.aclose()
             except Exception:
                 pass
-            self._mic_source = None
+            self._mic_input = None
 
         if self._connected:
             await self._room.disconnect()
@@ -185,16 +190,16 @@ class TarsLiveKitClient:
 
     async def _start_mic(self):
         """Open local mic via MediaDevices and publish as audio track."""
-        devices = _rtc.MediaDevices()
+        self._media_devices = _rtc.MediaDevices()
 
-        self._mic_source = devices.open_input(
+        self._mic_input = self._media_devices.open_input(
             enable_aec=True,
             noise_suppression=True,
             auto_gain_control=True,
         )
 
         self._mic_track = _rtc.LocalAudioTrack.create_audio_track(
-            "tars-mic", self._mic_source.source
+            "tars-mic", self._mic_input.source
         )
 
         options = _rtc.TrackPublishOptions(
@@ -207,10 +212,15 @@ class TarsLiveKitClient:
 
     # ── Audio output (agent → speaker) ───────────────────────────
 
-    def _start_audio_output(self):
-        """Set up speaker output — tracks are added when agent publishes."""
-        self._devices = _rtc.MediaDevices()
-        self._audio_player = self._devices.open_output()
+    async def _start_audio_output(self):
+        """Set up speaker output with AEC linked to mic input."""
+        # Pass the mic's APM for echo cancellation
+        apm = self._mic_input.apm if self._mic_input else None
+        delay = self._mic_input.delay_estimator if self._mic_input else None
+        self._audio_player = _rtc.media_devices.OutputPlayer(
+            apm_for_reverse=apm,
+            delay_estimator=delay,
+        )
         queue_message("LIVEKIT: Audio output device opened")
 
     # ── Video receive (agent → Pygame display) ───────────────────
@@ -258,6 +268,7 @@ class TarsLiveKitClient:
                 # Route agent audio to local speaker
                 if self._audio_player is not None:
                     self._audio_player.add_track(track)
+                    asyncio.ensure_future(self._audio_player.start())
                     queue_message("LIVEKIT: Agent audio → speaker")
                 set_tars_state(TarsState.TALKING)
 
