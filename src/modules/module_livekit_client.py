@@ -356,14 +356,27 @@ class TarsLiveKitClient:
     # ── Audio output (agent → speaker) ───────────────────────────
 
     async def _start_audio_output(self):
-        """Set up speaker output via PipeWire default device."""
+        """Set up speaker output on the USB audio device."""
+        import sounddevice as sd
+
+        # Find real USB output — ALSA 'default' (128ch) doesn't work
+        output_idx = None
+        for i, dev in enumerate(sd.query_devices()):
+            if dev.get("max_output_channels", 0) < 1:
+                continue
+            if "usb" in dev.get("name", "").lower():
+                output_idx = i
+                queue_message(f"LIVEKIT: Audio output → {dev['name']} (device {i})")
+                break
+
         apm = self._mic_input.apm if self._mic_input else None
         delay = self._mic_input.delay_estimator if self._mic_input else None
         self._audio_player = _rtc.media_devices.OutputPlayer(
             apm_for_reverse=apm,
             delay_estimator=delay,
+            output_device=output_idx,
         )
-        queue_message("LIVEKIT: Audio output ready (PipeWire default)")
+        queue_message("LIVEKIT: Audio output ready")
 
     # ── Room event handlers ──────────────────────────────────────
 
