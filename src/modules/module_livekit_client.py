@@ -118,7 +118,6 @@ def _start_display_server(livekit_url, room_name, port=8888):
                 "--disable-infobars",
                 "--disable-session-crashed-bubble",
                 "--autoplay-policy=no-user-gesture-required",
-                "--use-fake-ui-for-media-stream",
                 "--check-for-update-interval=31536000",
                 "--disable-features=TranslateUI",
                 "--no-first-run",
@@ -222,7 +221,11 @@ class TarsLiveKitClient:
         self._connected = False
         self._shutdown = threading.Event()
 
-        # Track references (mic/audio/video handled by browser)
+        # Audio handled by Python SDK, video by browser
+        self._media_devices = None
+        self._mic_input = None
+        self._mic_track = None
+        self._audio_player = None
 
         # Config
         lk_cfg = CONFIG["LIVEKIT"]
@@ -259,11 +262,8 @@ class TarsLiveKitClient:
         queue_message(f"LIVEKIT: Connecting to {self._livekit_url} "
                       f"room={self._room_name} as {self._identity}")
 
-        # Don't auto-subscribe — browser handles all incoming audio/video
-        await self._room.connect(
-            self._livekit_url, token,
-            options=_rtc.RoomOptions(auto_subscribe=False),
-        )
+        # Auto-subscribe so Python receives audio tracks for local playback
+        await self._room.connect(self._livekit_url, token)
         self._connected = True
         queue_message("LIVEKIT: Connected to room")
 
@@ -289,17 +289,20 @@ class TarsLiveKitClient:
 
         set_tars_state(TarsState.STANDBY)
 
-        # Mic + audio + video all handled by the browser display
-        # Python client only handles RPCs for physical actions
+        # Publish mic (Python SDK)
+        await self._start_mic()
+
+        # Set up audio output (Python SDK)
+        await self._start_audio_output()
 
         # Register RPC handlers
         self._register_rpc_handlers()
 
-        # Launch browser for audio + video display
+        # Launch browser for video display only
         _start_display_server(self._livekit_url, self._room_name)
 
-        queue_message("LIVEKIT: Client fully initialized — mic publishing, "
-                      "RPCs registered, audio+video in browser")
+        queue_message("LIVEKIT: Client fully initialized — mic+audio via Python, "
+                      "video in browser, RPCs registered")
 
     async def disconnect(self):
         """Disconnect from the room and clean up."""
@@ -307,10 +310,60 @@ class TarsLiveKitClient:
 
         _stop_display()
 
+        if self._audio_player is not None:
+            try:
+                await self._audio_player.aclose()
+            except Exception:
+                pass
+            self._audio_player = None
+
+        if self._mic_input is not None:
+            try:
+                await self._mic_input.aclose()
+            except Exception:
+                pass
+            self._mic_input = None
+
         if self._connected:
             await self._room.disconnect()
             self._connected = False
             queue_message("LIVEKIT: Disconnected from room")
+
+    # ── Mic publishing ───────────────────────────────────────────
+
+    async def _start_mic(self):
+        """Open local mic via MediaDevices and publish as audio track."""
+        self._media_devices = _rtc.MediaDevices()
+
+        self._mic_input = self._media_devices.open_input(
+            enable_aec=True,
+            noise_suppression=True,
+            auto_gain_control=True,
+        )
+
+        self._mic_track = _rtc.LocalAudioTrack.create_audio_track(
+            "tars-mic", self._mic_input.source
+        )
+
+        options = _rtc.TrackPublishOptions(
+            source=_rtc.TrackSource.SOURCE_MICROPHONE,
+        )
+        await self._room.local_participant.publish_track(
+            self._mic_track, options
+        )
+        queue_message("LIVEKIT: Mic track published")
+
+    # ── Audio output (agent → speaker) ───────────────────────────
+
+    async def _start_audio_output(self):
+        """Set up speaker output via PipeWire default device."""
+        apm = self._mic_input.apm if self._mic_input else None
+        delay = self._mic_input.delay_estimator if self._mic_input else None
+        self._audio_player = _rtc.media_devices.OutputPlayer(
+            apm_for_reverse=apm,
+            delay_estimator=delay,
+        )
+        queue_message("LIVEKIT: Audio output ready (PipeWire default)")
 
     # ── Room event handlers ──────────────────────────────────────
 
@@ -328,7 +381,24 @@ class TarsLiveKitClient:
                 f"from {participant.identity}"
             )
 
-            # Audio + video handled by Chromium browser display
+            if track.kind == _rtc.TrackKind.KIND_AUDIO:
+                # Route agent audio to local speaker via Python SDK
+                if self._audio_player is not None:
+                    async def _add_and_start(t, player):
+                        await player.add_track(t)
+                        try:
+                            await player.start()
+                        except RuntimeError:
+                            pass  # already started
+                    asyncio.ensure_future(
+                        _add_and_start(track, self._audio_player)
+                    )
+                    queue_message(
+                        f"LIVEKIT: Audio from {participant.identity} → speaker"
+                    )
+                set_tars_state(TarsState.TALKING)
+
+            # Video tracks handled by Chromium browser display
 
         @self._room.on("track_unsubscribed")
         def on_track_unsubscribed(
