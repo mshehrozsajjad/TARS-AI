@@ -31,6 +31,7 @@ _pending_ready = threading.Event()
 
 # Per-utterance mutable state — written by listener thread, read by main
 _transcript = None
+_finalized_segments = []  # accumulated final transcript segments
 _done = threading.Event()
 _eot = threading.Event()
 
@@ -40,7 +41,7 @@ EOT_THRESHOLD = 0.5
 # Grace period (in frames, each ~250ms) after Deepgram signals end-of-turn.
 # If the user resumes speaking within this window, recording continues.
 # This allows multi-sentence utterances while keeping turn detection fast.
-EOT_GRACE_FRAMES = 8  # ~2 seconds
+EOT_GRACE_FRAMES = 6  # ~1.5 seconds
 
 
 def _extract_transcript(message):
@@ -58,7 +59,12 @@ def _extract_transcript(message):
 
 
 def _on_message(message):
-    """Message handler — updates per-utterance state."""
+    """Message handler — updates per-utterance state.
+
+    Deepgram sends interim (partial) and final results per speech segment.
+    We accumulate finalized segments so multi-sentence utterances aren't lost,
+    and keep updating the current interim for the latest segment.
+    """
     global _transcript
     if not isinstance(message, dict):
         return
@@ -67,8 +73,16 @@ def _on_message(message):
         return
 
     text = _extract_transcript(message)
+    is_final = message.get("is_final", False)
+
     if text and text.strip():
-        _transcript = text.strip()
+        if is_final:
+            _finalized_segments.append(text.strip())
+        # Build full transcript: all finalized segments + current interim
+        parts = list(_finalized_segments)
+        if not is_final:
+            parts.append(text.strip())
+        _transcript = " ".join(parts)
 
     # Use Deepgram's end-of-turn confidence for fast end-of-speech
     eot_conf = message.get("end_of_turn_confidence", 0)
@@ -193,6 +207,7 @@ def transcribe_streaming(stt_manager):
 
     # Reset per-utterance state
     _transcript = None
+    _finalized_segments.clear()
     _done.clear()
     _eot.clear()
 
