@@ -78,9 +78,8 @@ class LiveKitDisplay:
         os.environ["SDL_AUDIODRIVER"] = "dummy"
 
         import pygame
-        # Only init display and events — NOT audio (would conflict with sounddevice)
+        # Only init display — NOT audio (would conflict with sounddevice)
         pygame.display.init()
-        pygame.event.init()
 
         flags = pygame.FULLSCREEN | pygame.NOFRAME if self._fullscreen else 0
         screen = pygame.display.set_mode(
