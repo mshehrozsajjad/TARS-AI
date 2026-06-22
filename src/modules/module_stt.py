@@ -363,11 +363,15 @@ class STTManager:
                     # Treat as a pre-trained model name (e.g. "hey_jarvis_v0.1")
                     model_paths = [oww_model_name]
 
-            # Use ONNX runtime since the project already depends on onnxruntime
-            self.oww_model = oww_Model(
-                wakeword_models=model_paths,
-                inference_framework="onnx",
-            )
+            # Detect the correct constructor parameter name — older versions
+            # use "wakeword_model_paths", newer versions use "wakeword_models"
+            import inspect
+            params = inspect.signature(oww_Model.__init__).parameters
+            if "wakeword_models" in params:
+                self.oww_model = oww_Model(wakeword_models=model_paths, inference_framework="onnx")
+            else:
+                self.oww_model = oww_Model(wakeword_model_paths=model_paths)
+
             loaded = list(self.oww_model.prediction_buffer.keys())
             queue_message(f"INFO: openWakeWord loaded successfully. Models: {loaded}")
         except Exception as e:
