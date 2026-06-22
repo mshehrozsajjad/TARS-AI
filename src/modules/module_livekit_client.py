@@ -705,7 +705,8 @@ class TarsLiveKitClient:
                 func = movements.get(name)
                 if func:
                     queue_message(f"LIVEKIT RPC: Moving — {name} ({speed})")
-                    func()
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(None, func)
                     return json.dumps({"status": "ok", "movement": name})
                 else:
                     return json.dumps({
@@ -728,7 +729,8 @@ class TarsLiveKitClient:
 
                 from modules.module_gestures import execute_gesture
                 queue_message(f"LIVEKIT RPC: Gesture — {name}")
-                execute_gesture(name)
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, execute_gesture, name)
                 return json.dumps({"status": "ok", "gesture": name})
             except Exception as e:
                 queue_message(f"LIVEKIT RPC: Gesture error — {e}")
