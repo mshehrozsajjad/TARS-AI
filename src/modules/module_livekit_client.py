@@ -83,6 +83,12 @@ def _start_display_server(livekit_url, room_name, port=8888):
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+            elif self.path == "/close":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                self.wfile.write(b"closing")
+                threading.Thread(target=_stop_display, daemon=True).start()
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -115,7 +121,7 @@ def _start_display_server(livekit_url, room_name, port=8888):
         _browser_process = subprocess.Popen(
             [
                 chromium_bin,
-                "--kiosk",  # TODO: enable once video display is finalized
+                "--kiosk",
                 "--noerrdialogs",
                 "--disable-infobars",
                 "--disable-session-crashed-bubble",

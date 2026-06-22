@@ -25,38 +25,30 @@ video {
     object-fit: cover;
 }
 
-#close-btn {
+#close-zone {
     position: fixed;
-    top: 10px;
-    right: 10px;
+    top: 0;
+    right: 0;
     z-index: 9999;
-    background: rgba(255,0,0,0.7);
-    color: #fff;
-    border: none;
-    border-radius: 50%;
-    width: 40px;
-    height: 40px;
-    font-size: 20px;
+    width: 60px;
+    height: 60px;
     cursor: pointer;
 }
 
 #status {
     position: fixed;
-    bottom: 10px;
-    left: 10px;
+    bottom: 5px;
+    left: 5px;
     z-index: 9999;
-    color: #0f0;
+    color: rgba(0,255,0,0.5);
     font-family: monospace;
-    font-size: 12px;
-    background: rgba(0,0,0,0.6);
-    padding: 4px 8px;
-    border-radius: 4px;
+    font-size: 10px;
 }
 </style>
 </head>
 <body>
 
-<button id="close-btn" onclick="window.close()">X</button>
+<div id="close-zone" onclick="fetch('/close')"></div>
 <div id="status">Connecting...</div>
 <div id="video-container"></div>
 
