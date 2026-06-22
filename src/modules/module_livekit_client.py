@@ -18,12 +18,16 @@ Requires: pip install livekit
 import os
 import json
 import asyncio
+import logging
 import threading
 import time
 import numpy as np
 from modules.module_config import load_config
 from modules.module_messageQue import queue_message
 from modules.module_state import set_tars_state, TarsState
+
+# Suppress non-fatal QueueFull warnings from livekit's internal audio mixer
+logging.getLogger("asyncio").setLevel(logging.CRITICAL)
 
 CONFIG = load_config()
 
