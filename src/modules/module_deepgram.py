@@ -41,7 +41,7 @@ EOT_THRESHOLD = 0.5
 # Grace period (in frames, each ~250ms) after Deepgram signals end-of-turn.
 # If the user resumes speaking within this window, recording continues.
 # This allows multi-sentence utterances while keeping turn detection fast.
-EOT_GRACE_FRAMES = 6  # ~1.5 seconds
+EOT_GRACE_FRAMES = 4  # ~1 second
 
 
 def _extract_transcript(message):

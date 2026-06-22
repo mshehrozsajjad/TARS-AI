@@ -1708,6 +1708,11 @@ class STTManager:
         # Reset model buffers for a fresh detection session
         self.oww_model.reset()
 
+        # openWakeWord needs ~16 embedding frames to stabilize its internal
+        # pipeline after reset.  Predictions during warmup are unreliable and
+        # can false-trigger on residual TTS audio or mic transients.
+        WARMUP_CHUNKS = 20  # ~1.6s at 80ms per chunk
+
         try:
           with ResamplingInputStream(dtype="int16") as mic:
             # Flush stale mic audio after TTS playback
@@ -1719,6 +1724,14 @@ class STTManager:
                     clear_mic_flush()
             except Exception:
                 pass
+
+            # Warmup: feed audio to the model without checking predictions
+            for _ in range(WARMUP_CHUNKS):
+                if not self.running or self.shutdown_event.is_set():
+                    break
+                data, _ = mic.read(chunk_size)
+                self.oww_model.predict(data.flatten().astype(np.int16))
+            self.oww_model.reset()
 
             while self.running and not self.shutdown_event.is_set():
                 if self.is_paused():
