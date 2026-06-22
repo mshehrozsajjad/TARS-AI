@@ -37,12 +37,10 @@ _eot = threading.Event()
 # Deepgram end-of-turn confidence threshold (0.0–1.0).
 EOT_THRESHOLD = 0.5
 
-# After Deepgram signals end-of-turn, require this many consecutive silent
-# frames (each ~250ms) from local VAD before actually ending recording.
-# This allows multi-sentence utterances: if the user pauses briefly between
-# sentences Deepgram may fire EOT, but VAD won't have accumulated enough
-# silence yet, and when the user resumes speaking the EOT is cleared.
-EOT_SILENCE_FRAMES = 3  # ~750ms of confirmed silence after EOT
+# Grace period (in frames, each ~250ms) after Deepgram signals end-of-turn.
+# If the user resumes speaking within this window, recording continues.
+# This allows multi-sentence utterances while keeping turn detection fast.
+EOT_GRACE_FRAMES = 8  # ~2 seconds
 
 
 def _extract_transcript(message):
@@ -220,6 +218,7 @@ def transcribe_streaming(stt_manager):
     max_silent_post_speech = stt_manager.MAX_SILENT_FRAMES
     min_speech_frames = 5
     aborted = False
+    eot_grace_countdown = -1  # -1 = not active, >=0 = counting down
 
     print(f"[DEEPGRAM] Listening (vad={stt_manager.vadmethod})", flush=True)
 
@@ -252,18 +251,26 @@ def transcribe_streaming(stt_manager):
                 # Run local VAD
                 is_silence, detected_speech, silent_frames = vad_func(data, detected_speech, silent_frames)
 
-                # ----- Fast path: Deepgram EOT + local VAD silence confirmation -----
-                # Deepgram provides semantic turn detection; local VAD provides
-                # acoustic confirmation.  Only end when BOTH agree.  If the user
-                # resumes speaking, VAD resets silent_frames and we clear EOT.
+                # ----- Fast path: Deepgram end-of-turn confidence -----
+                # Instead of breaking immediately, start a grace period so the
+                # user can continue with another sentence.  If they resume
+                # speaking (VAD detects non-silence), the countdown resets.
                 if _eot.is_set() and detected_speech and speech_frames >= min_speech_frames:
-                    if is_silence and silent_frames >= EOT_SILENCE_FRAMES:
-                        print(f"[DEEPGRAM] EOT (Deepgram+VAD) after {speech_frames} speech frames "
+                    if eot_grace_countdown < 0:
+                        eot_grace_countdown = EOT_GRACE_FRAMES
+                        _eot.clear()
+
+                if eot_grace_countdown >= 0:
+                    if not is_silence:
+                        # User resumed speaking — cancel the countdown
+                        eot_grace_countdown = -1
+                        _eot.clear()
+                    elif eot_grace_countdown == 0:
+                        print(f"[DEEPGRAM] EOT (Deepgram+grace) after {speech_frames} speech frames "
                               f"({(time.monotonic() - t_connected)*1000:.0f}ms)", flush=True)
                         break
-                    elif not is_silence:
-                        # User resumed speaking — clear EOT, keep recording
-                        _eot.clear()
+                    else:
+                        eot_grace_countdown -= 1
 
                 # ----- Slow fallback: local VAD silence timeout -----
                 _gesture_running = False
