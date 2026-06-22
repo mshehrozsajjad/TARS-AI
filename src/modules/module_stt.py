@@ -1714,13 +1714,11 @@ class STTManager:
                     break
 
                 data, _ = mic.read(chunk_size)
-                data = self.amplify_audio(data)
 
-                # RMS silence gate — skip prediction when quiet to save CPU
-                if self._is_quiet(data):
-                    continue
-
-                # openWakeWord expects int16 numpy array
+                # openWakeWord is a streaming model — it must see every frame
+                # (including silence) to maintain its internal mel spectrogram
+                # and embedding buffers. Do NOT apply silence gate or heavy
+                # amplification, as both break the feature pipeline.
                 audio_chunk = data.flatten().astype(np.int16)
                 prediction = self.oww_model.predict(audio_chunk)
 
