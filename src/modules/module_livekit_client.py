@@ -74,10 +74,13 @@ class LiveKitDisplay:
 
     def _render_loop(self):
         """Pygame render loop — runs in dedicated thread."""
-        os.environ.setdefault("SDL_VIDEODRIVER", "kmsdrm")
+        # Prevent SDL from grabbing ALSA audio devices — we use sounddevice
+        os.environ["SDL_AUDIODRIVER"] = "dummy"
 
         import pygame
-        pygame.init()
+        # Only init display and events — NOT audio (would conflict with sounddevice)
+        pygame.display.init()
+        pygame.event.init()
 
         flags = pygame.FULLSCREEN | pygame.NOFRAME if self._fullscreen else 0
         screen = pygame.display.set_mode(
@@ -213,9 +216,8 @@ class TarsLiveKitClient:
         self._audio_player = None
         self._video_stream = None
 
-        # Video display
+        # Video display — started lazily when first video track arrives
         self._display = LiveKitDisplay()
-        self._display.start()
 
         # Config
         lk_cfg = CONFIG["LIVEKIT"]
@@ -401,6 +403,10 @@ class TarsLiveKitClient:
         """Receive video frames from agent and render on Pygame display."""
         stream = _rtc.VideoStream(track)
         self._video_stream = stream
+
+        # Start display on first video track
+        if not self._display._running:
+            self._display.start()
 
         queue_message("LIVEKIT: Receiving agent video stream → display")
 
