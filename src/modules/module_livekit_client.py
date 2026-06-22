@@ -225,7 +225,6 @@ class TarsLiveKitClient:
         self._media_devices = None
         self._mic_input = None
         self._mic_track = None
-        self._audio_player = None
 
         # Config
         lk_cfg = CONFIG["LIVEKIT"]
@@ -291,31 +290,20 @@ class TarsLiveKitClient:
         # Publish mic
         await self._start_mic()
 
-        # Set up audio output for receiving agent audio
-        if self._play_local_audio:
-            await self._start_audio_output()
-
         # Register RPC handlers
         self._register_rpc_handlers()
 
-        # Launch browser for video display
+        # Launch browser for audio + video display
         _start_display_server(self._livekit_url, self._room_name)
 
         queue_message("LIVEKIT: Client fully initialized — mic publishing, "
-                      "audio output ready, RPCs registered, video in browser")
+                      "RPCs registered, audio+video in browser")
 
     async def disconnect(self):
         """Disconnect from the room and clean up."""
         self._shutdown.set()
 
         _stop_display()
-
-        if self._audio_player is not None:
-            try:
-                await self._audio_player.aclose()
-            except Exception:
-                pass
-            self._audio_player = None
 
         if self._mic_input is not None:
             try:
@@ -353,49 +341,6 @@ class TarsLiveKitClient:
         )
         queue_message("LIVEKIT: Mic track published")
 
-    # ── Audio output (agent → speaker) ───────────────────────────
-
-    async def _start_audio_output(self):
-        """Set up speaker output on the correct hardware device."""
-        import sounddevice as sd
-
-        # Find the real USB audio output (same logic as module_tts)
-        output_idx = None
-        try:
-            devices = sd.query_devices()
-            for i, dev in enumerate(devices):
-                if dev.get("max_output_channels", 0) < 1:
-                    continue
-                name = dev.get("name", "").lower()
-                if "hdmi" in name:
-                    continue
-                if "usb" in name:
-                    output_idx = i
-                    queue_message(f"LIVEKIT: Audio output → {dev['name']} (device {i})")
-                    break
-            if output_idx is None:
-                # Fall back to first non-virtual hardware device
-                for i, dev in enumerate(devices):
-                    if dev.get("max_output_channels", 0) < 1:
-                        continue
-                    name = dev.get("name", "").lower()
-                    if "default" not in name and "dmix" not in name and "sysdefault" not in name and "hdmi" not in name:
-                        output_idx = i
-                        queue_message(f"LIVEKIT: Audio output → {dev['name']} (device {i})")
-                        break
-        except Exception as e:
-            queue_message(f"LIVEKIT: Could not enumerate audio devices — {e}")
-
-        # Pass the mic's APM for echo cancellation
-        apm = self._mic_input.apm if self._mic_input else None
-        delay = self._mic_input.delay_estimator if self._mic_input else None
-        self._audio_player = _rtc.media_devices.OutputPlayer(
-            apm_for_reverse=apm,
-            delay_estimator=delay,
-            output_device=output_idx,
-        )
-        queue_message("LIVEKIT: Audio output device opened")
-
     # ── Room event handlers ──────────────────────────────────────
 
     def _register_room_events(self):
@@ -412,24 +357,7 @@ class TarsLiveKitClient:
                 f"from {participant.identity}"
             )
 
-            if track.kind == _rtc.TrackKind.KIND_AUDIO:
-                # Route agent audio to local speaker
-                if self._audio_player is not None:
-                    async def _add_and_start(t, player):
-                        await player.add_track(t)
-                        try:
-                            await player.start()
-                        except RuntimeError:
-                            pass  # already started — just adding track
-                    asyncio.ensure_future(
-                        _add_and_start(track, self._audio_player)
-                    )
-                    queue_message(
-                        f"LIVEKIT: Audio track from {participant.identity} → speaker"
-                    )
-                set_tars_state(TarsState.TALKING)
-
-            # Video tracks are handled by Chromium browser display
+            # Audio + video handled by Chromium browser display
 
         @self._room.on("track_unsubscribed")
         def on_track_unsubscribed(
