@@ -599,6 +599,7 @@ def load_config():
             "camera_width": config.getint('LIVEKIT', 'camera_width', fallback=640),
             "camera_height": config.getint('LIVEKIT', 'camera_height', fallback=480),
             "play_local_audio": config.getboolean('LIVEKIT', 'play_local_audio', fallback=True),
+            "display_mode": config.get('LIVEKIT', 'display_mode', fallback='browser'),
         },
         "GEMINI_LIVE": {
             "conversation_mode": config.get('GEMINI_LIVE', 'conversation_mode', fallback='standard'),

@@ -25,11 +25,19 @@ video {
     object-fit: cover;
 }
 
-* { cursor: none !important; }
+#close-zone {
+    position: fixed;
+    top: 0;
+    right: 0;
+    z-index: 9999;
+    width: 60px;
+    height: 60px;
+}
 </style>
 </head>
 <body>
 
+<div id="close-zone" onclick="fetch('/close')"></div>
 <div id="video-container"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>

@@ -20,11 +20,164 @@ import json
 import asyncio
 import threading
 import time
+import numpy as np
 from modules.module_config import load_config
 from modules.module_messageQue import queue_message
 from modules.module_state import set_tars_state, TarsState
 
 CONFIG = load_config()
+
+
+# ── Pygame video display (lightweight, low-res) ─────────────────────
+
+class PygameDisplay:
+    """Low-res Pygame video display for Pi.
+
+    Receives RGBA frames, downscales via numpy stride skip,
+    rotates the tiny surface, then scales up to fill screen.
+    Target: 25fps with minimal CPU.
+    """
+
+    TARGET_FPS = 25
+    # Downscale factor — take every Nth pixel in each dimension
+    DOWNSAMPLE = 3
+
+    def __init__(self):
+        self._frame = None
+        self._frame_lock = threading.Lock()
+        self._running = False
+        self._thread = None
+
+    def start(self):
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(
+            target=self._render_loop,
+            name="PygameDisplay",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self):
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=3)
+
+    def set_frame(self, rgba_array):
+        """Accept RGBA numpy array from video handler."""
+        with self._frame_lock:
+            self._frame = rgba_array
+
+    def _render_loop(self):
+        # Prevent SDL from touching audio devices
+        old_drv = os.environ.get("SDL_AUDIODRIVER")
+        os.environ["SDL_AUDIODRIVER"] = "dummy"
+
+        import pygame
+        pygame.display.init()
+
+        if old_drv is None:
+            os.environ.pop("SDL_AUDIODRIVER", None)
+        else:
+            os.environ["SDL_AUDIODRIVER"] = old_drv
+
+        # Auto-detect actual screen
+        info = pygame.display.Info()
+        hw_w = info.current_w   # 800
+        hw_h = info.current_h   # 480
+
+        screen = pygame.display.set_mode(
+            (hw_w, hw_h), pygame.FULLSCREEN | pygame.NOFRAME
+        )
+        pygame.mouse.set_visible(False)
+        screen.fill((0, 0, 0))
+        pygame.display.flip()
+
+        # Screen is landscape (800x480) but mounted portrait on TARS
+        # Logical view is portrait: 480 x 800
+        logical_w = hw_h   # 480
+        logical_h = hw_w   # 800
+
+        queue_message(f"LIVEKIT: Pygame display ready hw={hw_w}x{hw_h} "
+                      f"logical={logical_w}x{logical_h} @ {self.TARGET_FPS}fps")
+
+        interval = 1.0 / self.TARGET_FPS
+        last_frame = None
+
+        while self._running:
+            t0 = time.monotonic()
+
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self._running = False
+
+            with self._frame_lock:
+                new = self._frame
+                self._frame = None
+
+            if new is not None:
+                last_frame = new
+
+            if last_frame is not None:
+                try:
+                    # Downscale with stride skip — very fast, no interpolation
+                    ds = self.DOWNSAMPLE
+                    small = last_frame[::ds, ::ds, :3]
+                    small = np.ascontiguousarray(small)
+                    sh, sw = small.shape[:2]
+
+                    # Create tiny surface
+                    surface = pygame.image.frombuffer(
+                        small.data, (sw, sh), "RGB"
+                    )
+
+                    # Scale tiny surface to fill portrait logical view
+                    scale = max(logical_w / sw, logical_h / sh)
+                    scaled = pygame.transform.scale(
+                        surface, (int(sw * scale), int(sh * scale))
+                    )
+
+                    # Center crop to logical size
+                    cx = (scaled.get_width() - logical_w) // 2
+                    cy = (scaled.get_height() - logical_h) // 2
+                    logical = pygame.Surface((logical_w, logical_h))
+                    logical.blit(scaled, (-cx, -cy))
+
+                    # Rotate 270° to match physical screen
+                    rotated = pygame.transform.rotate(logical, 270)
+
+                    screen.blit(rotated, (0, 0))
+                    pygame.display.flip()
+                except Exception:
+                    pass
+
+            elapsed = time.monotonic() - t0
+            remaining = interval - elapsed
+            if remaining > 0:
+                time.sleep(remaining)
+
+        pygame.quit()
+        queue_message("LIVEKIT: Pygame display stopped")
+
+
+_pygame_display = None
+
+
+def _start_pygame_display():
+    global _pygame_display
+    if _pygame_display is None:
+        _pygame_display = PygameDisplay()
+    if not _pygame_display._running:
+        _pygame_display.start()
+    return _pygame_display
+
+
+def _stop_pygame_display():
+    global _pygame_display
+    if _pygame_display is not None:
+        _pygame_display.stop()
+        _pygame_display = None
 
 
 # ── Browser-based video display ──────────────────────────────────────
@@ -152,6 +305,7 @@ def _stop_display():
             except Exception:
                 pass
         _browser_process = None
+    _stop_pygame_display()
 
 
 # ── Lazy SDK import ──────────────────────────────────────────────────
@@ -229,7 +383,7 @@ class TarsLiveKitClient:
         self._connected = False
         self._shutdown = threading.Event()
 
-        # Audio handled by Python SDK, video by browser
+        # Audio handled by Python SDK, video by browser or pygame
         self._media_devices = None
         self._mic_input = None
         self._mic_track = None
@@ -241,6 +395,7 @@ class TarsLiveKitClient:
         self._room_name = lk_cfg["room_name"]
         self._identity = lk_cfg["participant_identity"]
         self._play_local_audio = lk_cfg["play_local_audio"]
+        self._display_mode = lk_cfg.get("display_mode", "browser")
 
     async def connect(self):
         """Create room with agent dispatch, then connect as participant."""
@@ -307,11 +462,13 @@ class TarsLiveKitClient:
         # Register RPC handlers
         self._register_rpc_handlers()
 
-        # Launch browser for video display only
-        _start_display_server(self._livekit_url, self._room_name)
-
-        queue_message("LIVEKIT: Client fully initialized — mic+audio via Python, "
-                      "video in browser, RPCs registered")
+        # Launch video display
+        if self._display_mode == "pygame":
+            _start_pygame_display()
+            queue_message("LIVEKIT: Client initialized — audio Python, video Pygame")
+        else:
+            _start_display_server(self._livekit_url, self._room_name)
+            queue_message("LIVEKIT: Client initialized — audio Python, video browser")
 
     async def disconnect(self):
         """Disconnect from the room and clean up."""
@@ -387,6 +544,37 @@ class TarsLiveKitClient:
         )
         queue_message("LIVEKIT: Audio output ready")
 
+    # ── Video receive (pygame mode) ──────────────────────────────
+
+    async def _handle_video_track(self, track):
+        """Receive video frames and push to pygame display at ~25fps."""
+        _rtc_local = _rtc
+        stream = _rtc_local.VideoStream(track)
+
+        queue_message("LIVEKIT: Receiving video → pygame display")
+
+        min_interval = 1.0 / 28  # slightly above 25fps target
+        last_time = 0.0
+
+        display = _pygame_display
+
+        async for frame_event in stream:
+            if self._shutdown.is_set():
+                break
+
+            now = time.monotonic()
+            if now - last_time < min_interval:
+                continue
+            last_time = now
+
+            frame = frame_event.frame
+            rgba = frame.convert(_rtc_local.VideoBufferType.RGBA)
+            arr = np.frombuffer(rgba.data, dtype=np.uint8)
+            arr = arr.reshape((rgba.height, rgba.width, 4))
+
+            if display is not None:
+                display.set_frame(arr)
+
     # ── Room event handlers ──────────────────────────────────────
 
     def _register_room_events(self):
@@ -424,7 +612,10 @@ class TarsLiveKitClient:
                     )
                 set_tars_state(TarsState.TALKING)
 
-            # Video tracks handled by Chromium browser display
+            # Video: pygame mode processes frames, browser mode ignores (browser subscribes itself)
+            if track.kind == _rtc.TrackKind.KIND_VIDEO and self._display_mode == "pygame":
+                asyncio.ensure_future(self._handle_video_track(track))
+                queue_message(f"LIVEKIT: Video from {participant.identity} → pygame")
 
         @self._room.on("track_unsubscribed")
         def on_track_unsubscribed(

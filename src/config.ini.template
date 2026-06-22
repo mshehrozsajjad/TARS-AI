@@ -94,6 +94,8 @@ camera_width = 640
 camera_height = 480
 # Play agent's audio response on Pi's physical speaker (True/False)
 play_local_audio = True
+# Video display mode: browser (Chromium, heavier but smooth) | pygame (lightweight, lower quality)
+display_mode = browser
 
 [STT]
 # Spoken language (use openai stt_processor for non-English)
