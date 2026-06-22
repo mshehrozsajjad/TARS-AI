@@ -299,8 +299,10 @@ class TarsLiveKitClient:
             if track.kind == _rtc.TrackKind.KIND_AUDIO:
                 # Route agent audio to local speaker
                 if self._audio_player is not None:
-                    self._audio_player.add_track(track)
-                    asyncio.ensure_future(self._audio_player.start())
+                    async def _start_playback(t):
+                        await self._audio_player.add_track(t)
+                        await self._audio_player.start()
+                    asyncio.ensure_future(_start_playback(track))
                     queue_message("LIVEKIT: Agent audio → speaker")
                 set_tars_state(TarsState.TALKING)
 
