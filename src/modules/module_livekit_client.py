@@ -425,8 +425,13 @@ class TarsLiveKitClient:
         queue_message(f"LIVEKIT: Connecting to {self._livekit_url} "
                       f"room={self._room_name} as {self._identity}")
 
-        # Auto-subscribe so Python receives audio tracks for local playback
-        await self._room.connect(self._livekit_url, token)
+        # Don't auto-subscribe — we manually handle what we need
+        # Browser mode: no tracks needed in Python (browser handles all media)
+        # Pygame mode: need video tracks for rendering
+        await self._room.connect(
+            self._livekit_url, token,
+            options=_rtc.RoomOptions(auto_subscribe=False),
+        )
         self._connected = True
         queue_message("LIVEKIT: Connected to room")
 
@@ -580,40 +585,45 @@ class TarsLiveKitClient:
     def _register_room_events(self):
         """Register handlers for room events."""
 
+        # With auto_subscribe=False, we manually subscribe to tracks we need
+        @self._room.on("track_published")
+        def on_track_published(
+            publication: _rtc.RemoteTrackPublication,
+            participant: _rtc.RemoteParticipant,
+        ):
+            # Subscribe to audio if Python handles it
+            if publication.kind == _rtc.TrackKind.KIND_AUDIO and self._play_local_audio:
+                publication.set_subscribed(True)
+                queue_message(f"LIVEKIT: Subscribing to audio from {participant.identity}")
+
+            # Subscribe to video only in pygame mode (browser subscribes itself)
+            if publication.kind == _rtc.TrackKind.KIND_VIDEO and self._display_mode == "pygame":
+                publication.set_subscribed(True)
+                queue_message(f"LIVEKIT: Subscribing to video from {participant.identity}")
+
         @self._room.on("track_subscribed")
         def on_track_subscribed(
             track: _rtc.Track,
             publication: _rtc.RemoteTrackPublication,
             participant: _rtc.RemoteParticipant,
         ):
-            queue_message(
-                f"LIVEKIT: Track subscribed: {track.kind} "
-                f"from {participant.identity}"
-            )
-
             if track.kind == _rtc.TrackKind.KIND_AUDIO:
-                # Python audio mode: route to local speaker
-                if self._play_local_audio and self._audio_player is not None:
+                if self._audio_player is not None:
                     async def _add_and_start(t, player):
                         await player.add_track(t)
                         try:
                             await player.start()
                         except RuntimeError:
-                            pass  # already started
+                            pass
                     asyncio.ensure_future(
                         _add_and_start(track, self._audio_player)
                     )
                     queue_message(
-                        f"LIVEKIT: Audio from {participant.identity} → speaker (Python)"
-                    )
-                else:
-                    queue_message(
-                        f"LIVEKIT: Audio from {participant.identity} → browser"
+                        f"LIVEKIT: Audio from {participant.identity} → speaker"
                     )
                 set_tars_state(TarsState.TALKING)
 
-            # Video: pygame mode processes frames, browser mode ignores (browser subscribes itself)
-            if track.kind == _rtc.TrackKind.KIND_VIDEO and self._display_mode == "pygame":
+            if track.kind == _rtc.TrackKind.KIND_VIDEO:
                 asyncio.ensure_future(self._handle_video_track(track))
                 queue_message(f"LIVEKIT: Video from {participant.identity} → pygame")
 
