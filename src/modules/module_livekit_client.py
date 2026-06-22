@@ -118,6 +118,7 @@ def _start_display_server(livekit_url, room_name, port=8888):
                 "--disable-infobars",
                 "--disable-session-crashed-bubble",
                 "--autoplay-policy=no-user-gesture-required",
+                "--use-fake-ui-for-media-stream",
                 "--check-for-update-interval=31536000",
                 "--disable-features=TranslateUI",
                 "--no-first-run",
@@ -221,10 +222,7 @@ class TarsLiveKitClient:
         self._connected = False
         self._shutdown = threading.Event()
 
-        # Track references
-        self._media_devices = None
-        self._mic_input = None
-        self._mic_track = None
+        # Track references (mic/audio/video handled by browser)
 
         # Config
         lk_cfg = CONFIG["LIVEKIT"]
@@ -291,8 +289,8 @@ class TarsLiveKitClient:
 
         set_tars_state(TarsState.STANDBY)
 
-        # Publish mic
-        await self._start_mic()
+        # Mic + audio + video all handled by the browser display
+        # Python client only handles RPCs for physical actions
 
         # Register RPC handlers
         self._register_rpc_handlers()
@@ -309,41 +307,10 @@ class TarsLiveKitClient:
 
         _stop_display()
 
-        if self._mic_input is not None:
-            try:
-                await self._mic_input.aclose()
-            except Exception:
-                pass
-            self._mic_input = None
-
         if self._connected:
             await self._room.disconnect()
             self._connected = False
             queue_message("LIVEKIT: Disconnected from room")
-
-    # ── Mic publishing ───────────────────────────────────────────
-
-    async def _start_mic(self):
-        """Open local mic via MediaDevices and publish as audio track."""
-        self._media_devices = _rtc.MediaDevices()
-
-        self._mic_input = self._media_devices.open_input(
-            enable_aec=True,
-            noise_suppression=True,
-            auto_gain_control=True,
-        )
-
-        self._mic_track = _rtc.LocalAudioTrack.create_audio_track(
-            "tars-mic", self._mic_input.source
-        )
-
-        options = _rtc.TrackPublishOptions(
-            source=_rtc.TrackSource.SOURCE_MICROPHONE,
-        )
-        await self._room.local_participant.publish_track(
-            self._mic_track, options
-        )
-        queue_message("LIVEKIT: Mic track published")
 
     # ── Room event handlers ──────────────────────────────────────
 
