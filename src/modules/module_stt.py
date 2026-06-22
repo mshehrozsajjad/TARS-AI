@@ -354,11 +354,17 @@ class STTManager:
 
             if oww_model_name:
                 # Check if it's a file path to a custom model in src/stt/
+                # Try exact name first, then with .onnx/.tflite extensions
                 custom_path = os.path.join(_stt_dir(), oww_model_name)
-                if os.path.isfile(custom_path):
-                    model_paths = [custom_path]
-                elif os.path.isfile(oww_model_name):
-                    model_paths = [oww_model_name]
+                candidates = [
+                    custom_path,
+                    custom_path + ".onnx",
+                    custom_path + ".tflite",
+                    oww_model_name,
+                ]
+                resolved = next((p for p in candidates if os.path.isfile(p)), None)
+                if resolved:
+                    model_paths = [resolved]
                 else:
                     # Treat as a pre-trained model name (e.g. "hey_jarvis_v0.1")
                     model_paths = [oww_model_name]
@@ -372,7 +378,7 @@ class STTManager:
             else:
                 self.oww_model = oww_Model(wakeword_model_paths=model_paths)
 
-            loaded = list(self.oww_model.prediction_buffer.keys())
+            loaded = list(self.oww_model.models.keys())
             queue_message(f"INFO: openWakeWord loaded successfully. Models: {loaded}")
         except Exception as e:
             queue_message(f"ERROR: Failed to load openWakeWord model: {e}")
