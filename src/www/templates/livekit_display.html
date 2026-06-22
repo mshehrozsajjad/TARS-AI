@@ -25,48 +25,24 @@ video {
     object-fit: cover;
 }
 
-#close-zone {
-    position: fixed;
-    top: 0;
-    right: 0;
-    z-index: 9999;
-    width: 60px;
-    height: 60px;
-    cursor: pointer;
-}
-
-#status {
-    position: fixed;
-    bottom: 5px;
-    left: 5px;
-    z-index: 9999;
-    color: rgba(0,255,0,0.5);
-    font-family: monospace;
-    font-size: 10px;
-}
+* { cursor: none !important; }
 </style>
 </head>
 <body>
 
-<div id="close-zone" onclick="fetch('/close')"></div>
-<div id="status">Connecting...</div>
 <div id="video-container"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
 <script>
 const container = document.getElementById('video-container');
-const status = document.getElementById('status');
 
 let browserAudio = false;
 
 async function start() {
-    status.textContent = 'Fetching token...';
     const resp = await fetch('/livekit-token');
     const data = await resp.json();
     const { url, token } = data;
     browserAudio = data.browser_audio || false;
-
-    status.textContent = 'Connecting... (audio: ' + (browserAudio ? 'browser' : 'python') + ')';
 
     const room = new LivekitClient.Room({
         adaptiveStream: true,
@@ -85,17 +61,12 @@ async function start() {
             el.style.objectFit = 'cover';
             el.muted = true;
             container.appendChild(el);
-            status.textContent = 'Video (low-res): ' + participant.identity;
         } else if (track.kind === LivekitClient.Track.Kind.Audio && browserAudio) {
             const el = track.attach();
             el.autoplay = true;
             el.volume = 1.0;
             document.body.appendChild(el);
-            el.play().then(() => {
-                status.textContent += ' | Audio: ' + participant.identity;
-            }).catch(err => {
-                status.textContent += ' | Audio ERR: ' + err.message;
-            });
+            el.play().catch(() => {});
         }
     });
 
@@ -104,12 +75,7 @@ async function start() {
     });
 
     room.on(LivekitClient.RoomEvent.Disconnected, () => {
-        status.textContent = 'Disconnected — reconnecting...';
         setTimeout(start, 3000);
-    });
-
-    room.on(LivekitClient.RoomEvent.Connected, () => {
-        status.textContent = 'Connected — waiting for video...';
     });
 
     await room.connect(url, token);
@@ -121,7 +87,6 @@ async function start() {
             await start();
             break;
         } catch (e) {
-            status.textContent = 'Error: ' + e.message + ' — retrying...';
             console.error('Connection failed, retrying in 3s...', e);
             await new Promise(r => setTimeout(r, 3000));
         }
