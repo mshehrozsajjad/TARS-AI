@@ -118,7 +118,7 @@ class TarsLiveKitClient:
         self._play_local_audio = lk_cfg["play_local_audio"]
 
     async def connect(self):
-        """Connect to LiveKit Cloud room and set up tracks + RPCs."""
+        """Create room with agent dispatch, then connect as participant."""
         if self._connected:
             return
 
@@ -127,9 +127,40 @@ class TarsLiveKitClient:
                 "LIVEKIT_URL must be set in .env"
             )
 
-        # Create room inside async context (requires active event loop)
-        self._room = _rtc.Room()
+        lk_cfg = CONFIG["LIVEKIT"]
+        api_key = lk_cfg["livekit_api_key"]
+        api_secret = lk_cfg["livekit_api_secret"]
 
+        # Create room with agent dispatch — agent auto-joins
+        try:
+            from livekit.api import (
+                LiveKitAPI,
+                CreateRoomRequest,
+                RoomAgentDispatch,
+            )
+
+            api = LiveKitAPI(
+                url=self._livekit_url,
+                api_key=api_key,
+                api_secret=api_secret,
+            )
+            await api.room.create_room(
+                CreateRoomRequest(
+                    name=self._room_name,
+                    agents=[
+                        RoomAgentDispatch(agent_name="tars-agent"),
+                    ],
+                )
+            )
+            await api.aclose()
+            queue_message(f"LIVEKIT: Room '{self._room_name}' created with "
+                          f"agent dispatch → tars-agent")
+        except Exception as e:
+            queue_message(f"LIVEKIT: Room creation warning — {e} "
+                          f"(may already exist, continuing)")
+
+        # Create Room and connect as participant
+        self._room = _rtc.Room()
         token = _generate_token(self._room_name, self._identity)
 
         # Register event handlers before connecting
