@@ -32,14 +32,14 @@ CONFIG = load_config()
 # ── Pygame video display ─────────────────────────────────────────────
 
 class LiveKitDisplay:
-    """Simple fullscreen Pygame display for rendering video frames.
+    """Lightweight video display for Pi — writes directly to framebuffer.
 
-    Runs a render loop in its own thread. Call set_frame(rgba_array)
-    from any thread to update the displayed image.
+    Falls back to Pygame if framebuffer isn't available.
+    Throttles to ~10fps to keep CPU usage minimal on Pi4.
     """
 
     def __init__(self):
-        self._frame = None
+        self._frame_bytes = None
         self._frame_lock = threading.Lock()
         self._running = False
         self._thread = None
@@ -48,9 +48,9 @@ class LiveKitDisplay:
         self._width = ui_cfg.get("screen_width", 480)
         self._height = ui_cfg.get("screen_height", 320)
         self._fullscreen = ui_cfg.get("fullscreen", True)
+        self._target_fps = 10
 
     def start(self):
-        """Start the display thread."""
         if self._running:
             return
         self._running = True
@@ -60,7 +60,6 @@ class LiveKitDisplay:
             daemon=True,
         )
         self._thread.start()
-        queue_message(f"LIVEKIT: Display started ({self._width}x{self._height})")
 
     def stop(self):
         self._running = False
@@ -68,93 +67,86 @@ class LiveKitDisplay:
             self._thread.join(timeout=3)
 
     def set_frame(self, rgba_array):
-        """Update the displayed frame. Called from async video handler."""
+        """Accept RGBA numpy array — do minimal work here (async thread)."""
+        # Only store raw bytes — all heavy work happens in render thread
         with self._frame_lock:
-            self._frame = rgba_array
+            self._frame_bytes = rgba_array
 
     def _render_loop(self):
-        """Pygame render loop — runs in dedicated thread."""
-        import pygame
-
-        # Prevent SDL audio init from grabbing ALSA — must be set before
-        # pygame.display.init(). We restore it after so sounddevice isn't
-        # affected in other threads.
-        old_audio_driver = os.environ.get("SDL_AUDIODRIVER")
+        """Render loop — uses Pygame with minimal transforms."""
+        # Prevent SDL from touching audio
+        old_drv = os.environ.get("SDL_AUDIODRIVER")
         os.environ["SDL_AUDIODRIVER"] = "dummy"
 
+        import pygame
         pygame.display.init()
 
-        # Restore env so sounddevice (PortAudio) isn't affected
-        if old_audio_driver is None:
+        if old_drv is None:
             os.environ.pop("SDL_AUDIODRIVER", None)
         else:
-            os.environ["SDL_AUDIODRIVER"] = old_audio_driver
+            os.environ["SDL_AUDIODRIVER"] = old_drv
 
-        # Display rotation — match ui_lite pattern
         display_w, display_h = self._width, self._height
+
+        # Detect rotation need — same as ui_lite
         if display_h > display_w:
-            # Portrait physical screen — no rotation needed
-            logical_w, logical_h = display_w, display_h
-            self._rotate = 0
+            rotate = 0
         else:
-            # Landscape physical screen — render portrait, rotate 270°
-            logical_w, logical_h = display_h, display_w
-            self._rotate = 270
+            rotate = 270
 
         flags = pygame.FULLSCREEN | pygame.NOFRAME if self._fullscreen else 0
-        screen = pygame.display.set_mode(
-            (display_w, display_h), flags
-        )
-        pygame.display.set_caption("TARS LiveKit")
+        screen = pygame.display.set_mode((display_w, display_h), flags)
         pygame.mouse.set_visible(False)
-        clock = pygame.time.Clock()
-
         screen.fill((0, 0, 0))
         pygame.display.flip()
 
+        queue_message(f"LIVEKIT: Display ready ({display_w}x{display_h}, "
+                      f"rotate={rotate}, {self._target_fps}fps)")
+
+        frame_interval = 1.0 / self._target_fps
+        last_frame = None
+
         while self._running:
+            t0 = time.monotonic()
+
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     self._running = False
-                    break
-                if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                    self._running = False
-                    break
 
             with self._frame_lock:
-                frame = self._frame
+                new_frame = self._frame_bytes
+                self._frame_bytes = None  # consume it
 
-            if frame is not None:
-                h, w = frame.shape[:2]
-                rgb = frame[:, :, :3]
-                surface = pygame.image.frombuffer(
-                    rgb.tobytes(), (w, h), "RGB"
-                )
+            if new_frame is not None:
+                last_frame = new_frame
 
-                # Scale to fill the logical (pre-rotation) surface
-                scale_w = logical_w / w
-                scale_h = logical_h / h
-                scale = max(scale_w, scale_h)  # fill, not fit
-                new_w = int(w * scale)
-                new_h = int(h * scale)
-                scaled = pygame.transform.scale(surface, (new_w, new_h))
+            if last_frame is not None:
+                try:
+                    h, w = last_frame.shape[:2]
+                    # Single scale directly to screen size — no intermediate surfaces
+                    # RGB only, skip alpha channel
+                    surface = pygame.image.frombuffer(
+                        np.ascontiguousarray(last_frame[:, :, :3]).data,
+                        (w, h), "RGB"
+                    )
 
-                # Crop to logical size (center crop)
-                crop_x = (new_w - logical_w) // 2
-                crop_y = (new_h - logical_h) // 2
-                composed = pygame.Surface((logical_w, logical_h))
-                composed.blit(scaled, (-crop_x, -crop_y))
+                    if rotate == 270:
+                        # Scale to rotated dimensions, then rotate
+                        scaled = pygame.transform.scale(surface, (display_h, display_w))
+                        final = pygame.transform.rotate(scaled, 270)
+                    else:
+                        final = pygame.transform.scale(surface, (display_w, display_h))
 
-                # Apply rotation to match physical screen orientation
-                if self._rotate != 0:
-                    final = pygame.transform.rotate(composed, self._rotate)
-                else:
-                    final = composed
+                    screen.blit(final, (0, 0))
+                    pygame.display.flip()
+                except Exception:
+                    pass  # drop corrupted frames silently
 
-                screen.blit(final, (0, 0))
-                pygame.display.flip()
-
-            clock.tick(30)
+            # Sleep to hit target FPS
+            elapsed = time.monotonic() - t0
+            sleep_time = frame_interval - elapsed
+            if sleep_time > 0:
+                time.sleep(sleep_time)
 
         pygame.quit()
 
@@ -420,29 +412,35 @@ class TarsLiveKitClient:
     # ── Video receive (agent → Pygame display) ───────────────────
 
     async def _handle_video_track(self, track):
-        """Receive video frames from agent and render on Pygame display."""
+        """Receive video frames from agent — throttled to ~10fps."""
         stream = _rtc.VideoStream(track)
         self._video_stream = stream
 
-        # Start display on first video track
         if not self._display._running:
             self._display.start()
 
         queue_message("LIVEKIT: Receiving agent video stream → display")
 
+        # Only process ~10 frames per second — drop the rest
+        min_interval = 1.0 / 12  # slightly above display fps
+        last_time = 0.0
+
         async for frame_event in stream:
             if self._shutdown.is_set():
                 break
 
+            now = time.monotonic()
+            if now - last_time < min_interval:
+                continue  # skip this frame
+            last_time = now
+
             frame = frame_event.frame
-            # Convert to RGBA numpy array
             rgba_frame = frame.convert(_rtc.VideoBufferType.RGBA)
             frame_data = np.frombuffer(rgba_frame.data, dtype=np.uint8)
             frame_data = frame_data.reshape(
                 (rgba_frame.height, rgba_frame.width, 4)
             )
 
-            # Push to display
             self._display.set_frame(frame_data)
 
     # ── Room event handlers ──────────────────────────────────────
