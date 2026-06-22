@@ -102,10 +102,17 @@ def _start_display_server(livekit_url, room_name, port=8888):
     time.sleep(0.5)
 
     # Launch Chromium in kiosk mode — fullscreen, no UI chrome
+    # Binary name varies: "chromium-browser" (older Pi OS) vs "chromium" (newer)
+    import shutil
+    chromium_bin = shutil.which("chromium-browser") or shutil.which("chromium")
+    if not chromium_bin:
+        queue_message("WARNING: chromium not found — video display unavailable")
+        return
+
     try:
         _browser_process = subprocess.Popen(
             [
-                "chromium-browser",
+                chromium_bin,
                 "--kiosk",
                 "--noerrdialogs",
                 "--disable-infobars",
@@ -120,8 +127,8 @@ def _start_display_server(livekit_url, room_name, port=8888):
             stderr=subprocess.DEVNULL,
         )
         queue_message("LIVEKIT: Chromium kiosk launched for video display")
-    except FileNotFoundError:
-        queue_message("WARNING: chromium-browser not found — video display unavailable")
+    except Exception as e:
+        queue_message(f"WARNING: Could not launch Chromium — {e}")
 
 
 def _stop_display():
