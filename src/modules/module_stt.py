@@ -366,8 +366,21 @@ class STTManager:
                 if resolved:
                     model_paths = [resolved]
                 else:
-                    # Treat as a pre-trained model name (e.g. "hey_jarvis_v0.1")
-                    model_paths = [oww_model_name]
+                    # Match against pre-trained model names by basename
+                    import openwakeword
+                    pretrained = openwakeword.get_pretrained_model_paths()
+                    match = next(
+                        (p for p in pretrained
+                         if os.path.basename(p).replace(".onnx", "").replace(".tflite", "") == oww_model_name
+                         or os.path.basename(p) == oww_model_name),
+                        None,
+                    )
+                    if match:
+                        model_paths = [match]
+                    else:
+                        available = [os.path.basename(p) for p in pretrained]
+                        queue_message(f"ERROR: openWakeWord model '{oww_model_name}' not found. Available: {available}")
+                        return
 
             # Detect the correct constructor parameter name — older versions
             # use "wakeword_model_paths", newer versions use "wakeword_models"
