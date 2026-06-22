@@ -45,10 +45,9 @@ class LiveKitDisplay:
         self._thread = None
 
         ui_cfg = CONFIG.get("UI", {})
-        self._width = ui_cfg.get("screen_width", 480)
-        self._height = ui_cfg.get("screen_height", 320)
         self._fullscreen = ui_cfg.get("fullscreen", True)
         self._target_fps = 10
+        # Actual resolution detected at render_loop start
 
     def start(self):
         if self._running:
@@ -86,13 +85,15 @@ class LiveKitDisplay:
         else:
             os.environ["SDL_AUDIODRIVER"] = old_drv
 
-        display_w, display_h = self._width, self._height
+        # Auto-detect actual screen resolution
+        info = pygame.display.Info()
+        display_w = info.current_w   # e.g. 800 (hardware landscape)
+        display_h = info.current_h   # e.g. 480
 
-        # Detect rotation need — same as ui_lite
-        if display_h > display_w:
-            rotate = 0
-        else:
-            rotate = 270
+        # Screen is physically rotated on TARS — logical view is portrait
+        # Logical surface: portrait (480 x 800), rotated 270° onto (800 x 480)
+        logical_w = display_h   # 480
+        logical_h = display_w   # 800
 
         flags = pygame.FULLSCREEN | pygame.NOFRAME if self._fullscreen else 0
         screen = pygame.display.set_mode((display_w, display_h), flags)
@@ -100,8 +101,9 @@ class LiveKitDisplay:
         screen.fill((0, 0, 0))
         pygame.display.flip()
 
-        queue_message(f"LIVEKIT: Display ready ({display_w}x{display_h}, "
-                      f"rotate={rotate}, {self._target_fps}fps)")
+        queue_message(f"LIVEKIT: Display ready hw={display_w}x{display_h}, "
+                      f"logical={logical_w}x{logical_h}, rotate=270, "
+                      f"{self._target_fps}fps")
 
         frame_interval = 1.0 / self._target_fps
         last_frame = None
@@ -115,7 +117,7 @@ class LiveKitDisplay:
 
             with self._frame_lock:
                 new_frame = self._frame_bytes
-                self._frame_bytes = None  # consume it
+                self._frame_bytes = None
 
             if new_frame is not None:
                 last_frame = new_frame
@@ -123,26 +125,34 @@ class LiveKitDisplay:
             if last_frame is not None:
                 try:
                     h, w = last_frame.shape[:2]
-                    # Single scale directly to screen size — no intermediate surfaces
-                    # RGB only, skip alpha channel
+                    rgb = np.ascontiguousarray(last_frame[:, :, :3])
                     surface = pygame.image.frombuffer(
-                        np.ascontiguousarray(last_frame[:, :, :3]).data,
-                        (w, h), "RGB"
+                        rgb.data, (w, h), "RGB"
                     )
 
-                    if rotate == 270:
-                        # Scale to rotated dimensions, then rotate
-                        scaled = pygame.transform.scale(surface, (display_h, display_w))
-                        final = pygame.transform.rotate(scaled, 270)
-                    else:
-                        final = pygame.transform.scale(surface, (display_w, display_h))
+                    # Scale avatar to fill the portrait logical surface
+                    # Use max scale to fill (crop overflow), not min (letterbox)
+                    scale = max(logical_w / w, logical_h / h)
+                    new_w = int(w * scale)
+                    new_h = int(h * scale)
+                    scaled = pygame.transform.scale(surface, (new_w, new_h))
 
-                    screen.blit(final, (0, 0))
+                    # Center-crop to logical size
+                    crop_x = (new_w - logical_w) // 2
+                    crop_y = (new_h - logical_h) // 2
+                    composed = screen.copy()
+                    composed.fill((0, 0, 0))
+                    # Blit onto a logical-sized surface, then rotate
+                    logical_surf = pygame.Surface((logical_w, logical_h))
+                    logical_surf.blit(scaled, (-crop_x, -crop_y))
+
+                    # Rotate 270° to match physical screen orientation
+                    rotated = pygame.transform.rotate(logical_surf, 270)
+                    screen.blit(rotated, (0, 0))
                     pygame.display.flip()
                 except Exception:
-                    pass  # drop corrupted frames silently
+                    pass
 
-            # Sleep to hit target FPS
             elapsed = time.monotonic() - t0
             sleep_time = frame_interval - elapsed
             if sleep_time > 0:
