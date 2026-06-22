@@ -1156,3 +1156,209 @@ def ventilate_off():
             servoctl.MOVING = was_moving
             if not was_moving:
                 servoctl._notify_movement_end()
+
+
+# ── Mood-modulated gestures ─────────────────────────────────────────────────
+#
+# Based on the original movement functions but a notch down:
+# shorter holds (3s → 1s), fewer repetitions (5 → 3), same servo positions.
+# Each takes speed (0.3–1.5) and amplitude (0.3–1.5) from the mood system.
+# amplitude scales targets toward/away from neutral (50%).
+# speed scales the speed_factor passed to move_legs().
+
+def _amp(target, amplitude):
+    """Scale a leg percentage toward neutral (50) by amplitude factor."""
+    return int(50 + (target - 50) * amplitude)
+
+
+def simple_nod(speed=1.0, amplitude=1.0):
+    """Forward bow + return. Based on bow() but shorter hold."""
+    if servoctl.MOVING:
+        return
+    servoctl.MOVING = True
+    try:
+        move_legs(50, 50, 50, 50, 0.4 * speed)
+        move_legs(_amp(15, amplitude), _amp(15, amplitude), 50, 50, 0.7 * speed)
+        move_legs(_amp(15, amplitude), _amp(15, amplitude),
+                  _amp(70, amplitude), _amp(70, amplitude), 0.7 * speed)
+        move_legs(_amp(95, amplitude), _amp(95, amplitude),
+                  _amp(65, amplitude), _amp(65, amplitude), 0.7 * speed)
+        time.sleep(1.0 / max(speed, 0.3))
+        move_legs(_amp(15, amplitude), _amp(15, amplitude),
+                  _amp(65, amplitude), _amp(65, amplitude), 0.7 * speed)
+        move_legs(50, 50, 50, 50, 0.4 * speed)
+        disable_all_servos()
+    finally:
+        servoctl.MOVING = False
+
+
+def simple_lean(speed=1.0, amplitude=1.0):
+    """Tilt to one side + hold + return. Based on tilt_right() but shorter hold."""
+    if servoctl.MOVING:
+        return
+    servoctl.MOVING = True
+    try:
+        move_legs(50, 50, 50, 50, 0.9 * speed)
+        move_legs(_amp(20, amplitude), _amp(80, amplitude), 50, 50, 0.9 * speed)
+        time.sleep(1.0 / max(speed, 0.3))
+        move_legs(50, 50, 50, 50, 0.9 * speed)
+        disable_all_servos()
+    finally:
+        servoctl.MOVING = False
+
+
+def simple_recoil(speed=1.0, amplitude=1.0):
+    """Tilt away + hold + return. Based on tilt_left() but shorter hold."""
+    if servoctl.MOVING:
+        return
+    servoctl.MOVING = True
+    try:
+        move_legs(50, 50, 50, 50, 0.9 * speed)
+        move_legs(_amp(80, amplitude), _amp(20, amplitude), 50, 50, 0.9 * speed)
+        time.sleep(1.0 / max(speed, 0.3))
+        move_legs(50, 50, 50, 50, 0.9 * speed)
+        disable_all_servos()
+    finally:
+        servoctl.MOVING = False
+
+
+def simple_rock(speed=1.0, amplitude=1.0):
+    """Side-to-side rock. Based on side_side() but 3 rocks instead of 6."""
+    if servoctl.MOVING:
+        return
+    servoctl.MOVING = True
+    try:
+        move_legs(50, 50, 50, 50, 0.9 * speed)
+        reps = max(2, int(3 * amplitude))
+        for _ in range(reps):
+            move_legs(_amp(25, amplitude), _amp(75, amplitude), 50, 50, 0.9 * speed)
+            move_legs(_amp(75, amplitude), _amp(25, amplitude), 50, 50, 0.9 * speed)
+        move_legs(50, 50, 50, 50, 0.7 * speed)
+        disable_all_servos()
+    finally:
+        servoctl.MOVING = False
+
+
+def simple_bounce(speed=1.0, amplitude=1.0):
+    """Bouncing motion. Based on laugh() but 3 bounces instead of 5."""
+    if servoctl.MOVING:
+        return
+    servoctl.MOVING = True
+    try:
+        reps = max(2, int(3 * amplitude))
+        for _ in range(reps):
+            move_legs(50, 50, 50, 50, 1.0 * speed)
+            time.sleep(0.1 / max(speed, 0.3))
+            move_legs(_amp(1, amplitude), _amp(1, amplitude), 50, 50, 1.0 * speed)
+            time.sleep(0.1 / max(speed, 0.3))
+        move_legs(50, 50, 50, 50, 1.0 * speed)
+        time.sleep(0.2 / max(speed, 0.3))
+        disable_all_servos()
+    finally:
+        servoctl.MOVING = False
+
+
+def simple_shrug(speed=1.0, amplitude=1.0):
+    """Alternating lean. Based on excited() but 2 cycles instead of 4."""
+    if servoctl.MOVING:
+        return
+    servoctl.MOVING = True
+    try:
+        move_legs(50, 50, 50, 50, 0.9 * speed)
+        reps = max(2, int(2 * amplitude))
+        for _ in range(reps):
+            move_legs(_amp(40, amplitude), _amp(60, amplitude),
+                      _amp(45, amplitude), 50, 0.95 * speed)
+            move_legs(_amp(60, amplitude), _amp(40, amplitude),
+                      50, _amp(45, amplitude), 0.95 * speed)
+        move_legs(50, 50, 50, 50, 0.9 * speed)
+        disable_all_servos()
+    finally:
+        servoctl.MOVING = False
+
+
+def simple_wave(speed=1.0, amplitude=1.0):
+    """Wave greeting. Based on wave_right() but fewer steps."""
+    if servoctl.MOVING:
+        return
+    servoctl.MOVING = True
+    try:
+        move_legs(50, 50, 50, 50, 0.8 * speed)
+        move_legs(_amp(20, amplitude), _amp(80, amplitude), 50, 50, 0.9 * speed)
+        for _ in range(2):
+            move_legs(_amp(15, amplitude), _amp(85, amplitude),
+                      _amp(35, amplitude), _amp(65, amplitude), 0.9 * speed)
+            move_legs(_amp(25, amplitude), _amp(75, amplitude),
+                      _amp(65, amplitude), _amp(35, amplitude), 0.9 * speed)
+        move_legs(50, 50, 50, 50, 0.6 * speed)
+        disable_all_servos()
+    finally:
+        servoctl.MOVING = False
+
+
+def simple_settle(speed=1.0, amplitude=1.0):
+    """Gentle crouch + return. Based on pose() but shorter hold."""
+    if servoctl.MOVING:
+        return
+    servoctl.MOVING = True
+    try:
+        move_legs(50, 50, 50, 50, 0.7 * speed)
+        move_legs(_amp(70, amplitude), _amp(70, amplitude), 50, 50, 0.6 * speed)
+        time.sleep(1.0 / max(speed, 0.3))
+        move_legs(50, 50, 50, 50, 0.5 * speed)
+        disable_all_servos()
+    finally:
+        servoctl.MOVING = False
+
+
+# ── Idle fidgets (body-autopilot, no LLM) ───────────────────────────────────
+#
+# Subtle movements that play periodically during STANDBY.
+# These do NOT call _notify_movement_start/end — they're too subtle
+# to warrant pausing STT or UI.
+
+def fidget_weight_shift(amplitude=1.0):
+    """Subtle left/right weight shift."""
+    if servoctl.MOVING:
+        return
+    servoctl.MOVING = True
+    try:
+        offset = int(8 * amplitude)
+        move_legs(50 - offset, 50 + offset, 50, 50, 0.4)
+        time.sleep(0.5)
+        move_legs(50, 50, 50, 50, 0.3)
+        disable_all_servos()
+    finally:
+        servoctl.MOVING = False
+
+
+def fidget_settle(amplitude=1.0):
+    """Small height adjust then release."""
+    if servoctl.MOVING:
+        return
+    servoctl.MOVING = True
+    try:
+        offset = int(8 * amplitude)
+        move_legs(50 + offset, 50 + offset, 50, 50, 0.3)
+        time.sleep(0.4)
+        move_legs(50, 50, 50, 50, 0.3)
+        disable_all_servos()
+    finally:
+        servoctl.MOVING = False
+
+
+def fidget_rock(amplitude=1.0):
+    """Subtle front-back sway."""
+    if servoctl.MOVING:
+        return
+    servoctl.MOVING = True
+    try:
+        offset = int(6 * amplitude)
+        move_legs(50, 50, 50 - offset, 50 + offset, 0.3)
+        time.sleep(0.4)
+        move_legs(50, 50, 50 + offset, 50 - offset, 0.3)
+        time.sleep(0.3)
+        move_legs(50, 50, 50, 50, 0.3)
+        disable_all_servos()
+    finally:
+        servoctl.MOVING = False

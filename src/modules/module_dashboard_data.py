@@ -49,7 +49,15 @@ _log_dirty = False         # True when in-memory log has unflushed changes
 
 # ── Emotional state (derived from recent interactions) ────────────────────────
 _EMO_WINDOW = 50
-_EMO_HALF_LIFE = 1800     # seconds (30 min)
+# Default half-life: 2 hours — mood lingers across conversations.
+# Overridden by [EMOTION] mood_half_life in config.ini (in seconds).
+try:
+    from modules.module_config import load_config as _lc
+    _EMO_HALF_LIFE = int(_lc().get('EMOTION', {}).get('mood_half_life', 7200))
+except Exception:
+    _EMO_HALF_LIFE = 7200
+
+_MOOD_FILE = os.path.join(_MEMORY_DIR, "mood_state.json")
 
 _RADAR_AXES = ["joy", "anger", "sadness", "fear", "love", "curiosity", "surprise", "neutral"]
 
@@ -195,6 +203,35 @@ def _rebuild_emo_cache():
     return cache
 
 
+def _save_mood_state():
+    """Persist the emotion cache to disk so mood survives restarts."""
+    with _emo_cache_lock:
+        snapshot = list(_emo_cache)
+    if not snapshot:
+        return
+    try:
+        os.makedirs(_MEMORY_DIR, exist_ok=True)
+        data = [{"ts": ts, "scores": scores} for ts, scores in snapshot]
+        tmp = _MOOD_FILE + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(data, f, separators=(',', ':'))
+        os.replace(tmp, _MOOD_FILE)
+    except Exception:
+        pass
+
+
+def _load_mood_state():
+    """Load persisted mood state from disk. Returns list of (timestamp, scores)."""
+    if not os.path.exists(_MOOD_FILE):
+        return []
+    try:
+        with open(_MOOD_FILE, 'r') as f:
+            data = json.load(f)
+        return [(entry["ts"], entry["scores"]) for entry in data if "ts" in entry and "scores" in entry]
+    except (json.JSONDecodeError, IOError, KeyError):
+        return []
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def _get_last_prompt():
@@ -253,13 +290,14 @@ def log_interaction(user_input, bot_response, emotion=None, emotion_raw=None, ax
             del _log_entries[:len(_log_entries) - _MAX_ENTRIES]
         _log_dirty = True
 
-    # Update in-memory emotion cache
+    # Update in-memory emotion cache and persist to disk
     if axis_scores:
         ts_float = datetime.now().timestamp()
         with _emo_cache_lock:
             _emo_cache.append((ts_float, axis_scores))
             if len(_emo_cache) > _EMO_WINDOW:
                 _emo_cache[:] = _emo_cache[-_EMO_WINDOW:]
+        _save_mood_state()
 
 
 def get_interactions(limit=100):
@@ -320,12 +358,16 @@ def get_mood_analytics():
 # ── Initialization ────────────────────────────────────────────────────────────
 
 def _init():
-    """Bootstrap: load log, rebuild emotion cache, start periodic flush."""
+    """Bootstrap: load log, rebuild emotion cache from disk, start periodic flush."""
     global _emo_cache
     _ensure_log()
     with _emo_cache_lock:
         if not _emo_cache:
-            _emo_cache = _rebuild_emo_cache()
+            # Try persisted mood state first (survives restarts)
+            _emo_cache = _load_mood_state()
+            if not _emo_cache:
+                # Fall back to rebuilding from interaction log
+                _emo_cache = _rebuild_emo_cache()
     _start_periodic_flush()
 
 _init()

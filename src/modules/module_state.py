@@ -85,6 +85,11 @@ def register_stt_manager(stt_mgr) -> None:
     _stt_manager = stt_mgr
 
 
+def get_stt_manager():
+    """Return the registered STT manager (or None if not yet registered)."""
+    return _stt_manager
+
+
 def force_standby() -> None:
     """Kill any active STT session and force TARS into STANDBY. Safe to call from anywhere."""
     if _stt_manager:

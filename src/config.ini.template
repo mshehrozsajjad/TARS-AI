@@ -27,7 +27,7 @@ enable_thinking_responses = false
 thinking_responses = ["Let me think...","soooo.....","soo....","Let's seeee...","Let me seeee...","Let's see.....","One Moment...","One Moment","hum","humm","Analyzing...","Processing...","Calculating...","Computing...","Running the numbers...","Checking...","One moment...","Scanning data...","Assessing...","Evaluating...","Let me calculate...","Working on it...","Just a moment...","Reviewing...","Compiling...","Cross-referencing...","Thinking it through...","Give me a second...","Hold on..."]
 
 [LLM]
-# AI backend: openai | grok | deepinfra | other
+# AI backend: openai | grok | deepinfra | gemini | other
 llm_backend = other
 # API endpoint URL (used when llm_backend = other)
 base_url = https://api.featherless.ai
@@ -35,6 +35,8 @@ base_url = https://api.featherless.ai
 openai_model = gpt-4o-mini
 # Model name for grok backend
 grok_model = grok-4-1-fast-non-reasoning
+# Model name for gemini backend (e.g., gemini-2.5-flash, gemini-2.5-pro)
+gemini_model = gemini-2.5-flash
 # Model name for other (custom) backend
 other_model = meta-llama/Meta-Llama-3.1-8B-Instruct
 # System instructions prepended to every conversation (keep general; personality goes in character card)
@@ -54,19 +56,41 @@ json_mode = True
 # Token counting encoding — only change if token errors occur (cl100k_base works for most models)
 override_encoding_model = cl100k_base
 
+[DEVICE]
+# Force a device profile instead of auto-detecting from hardware.
+# Useful when running Pi3 dependencies on Pi4 hardware (1GB RAM).
+# Leave empty for auto-detection. Options: pi5 | pi4 | pi3 | pizero2
+profile =
+
+[GEMINI_LIVE]
+# Conversation mode: standard (STT→LLM→TTS) | gemini_live (audio→Gemini Live API→TTS)
+# standard = existing pipeline with separate STT, LLM, and TTS steps
+# gemini_live = stream raw audio to Google Gemini Live API, bypassing local STT
+conversation_mode = standard
+# Gemini Live model name
+model = gemini-3.1-flash-live-preview
+# VAD silence duration in ms — how long Gemini waits after speech stops (500–1500)
+vad_silence_ms = 700
+# VAD prefix padding in ms — audio captured before speech starts (100–500)
+vad_prefix_ms = 200
+# Context window compression trigger in tokens (higher = more context retained)
+context_trigger_tokens = 32000
+
 [STT]
 # Spoken language (use openai stt_processor for non-English)
 language = english
 # Activation phrase — 2–3 syllables works best
 wake_word = hey tars
 # Wake word engine (independent of stt_processor — mix freely)
-#   Pi5: sherpa-onnx | atomik | fastrtc
-#   Pi4: sherpa-onnx | atomik
-#   Pi3: sherpa-onnx | atomik
+#   Pi5: sherpa-onnx | atomik | openwakeword | fastrtc
+#   Pi4: sherpa-onnx | atomik | openwakeword
+#   Pi3: sherpa-onnx | atomik | openwakeword
 #   PiZero2: atomik
 wake_word_processor = atomik
 # Atomik detection mode (atomik only) auto = use ONNX model if available, otherwise fall back to template, model = ONNX model only (trained with tools/wakeword-trainer), template = cosine similarity only (record wake word 5 times on device)
 atomik_mode = template
+# openWakeWord model name — pre-trained name (e.g. "hey_jarvis_v0.1") or path to custom .onnx/.tflite in stt/ folder. Leave blank to load all pre-trained models.
+oww_model_name =
 # Wake word gates — apply to all wake word engines
 # Transcript verify: only active when wake_word_processor = atomik AND atomik_mode = template
 vad_transcript_verify = False
@@ -76,10 +100,10 @@ vad_presence_gate = off
 # Wake word strictness 1–10 (atomik only; 1 = lenient, 10 = strict)
 sensitivity = 7
 # Speech-to-text engine (independent of wake_word_processor — mix freely)
-#   Pi5: sherpa-onnx | fastrtc | silero | openai | external
-#   Pi4: sherpa-onnx | openai | external
-#   Pi3: openai | external
-#   PiZero2: openai
+#   Pi5: sherpa-onnx | fastrtc | silero | openai | gladia | deepgram | external
+#   Pi4: sherpa-onnx | openai | gladia | deepgram | external
+#   Pi3: openai | gladia | deepgram | external
+#   PiZero2: openai | gladia | deepgram
 stt_processor = sherpa-onnx
 # Play beep when listening starts and stops
 use_indicators = True
@@ -149,6 +173,9 @@ emotion_method = llm
 # HuggingFace model for emotion analysis (only used when emotion_method = classifier)
 # Use the ONNX variant for faster CPU inference: SamLowe/roberta-base-go_emotions-onnx
 emotion_model = SamLowe/roberta-base-go_emotions-onnx
+# Mood half-life in seconds — how long emotional state lingers (7200 = 2 hours)
+# Higher = mood persists longer across conversations. Lower = mood fades quickly.
+mood_half_life = 7200
 
 [VISION]
 # Enable camera vision (~1GB RAM when active)
@@ -200,6 +227,11 @@ webui_port = 80
 webui_password = tarspassword
 # Web UI color theme (auto-discovered from css/themes/ folder)
 webui_theme = default
+# Cloudflare named tunnel for static URL (leave empty for random quick-tunnel URL)
+# Setup: cloudflared tunnel login && cloudflared tunnel create <name> && cloudflared tunnel route dns <name> subdomain.yourdomain.com
+tunnel_name =
+# Hostname for named tunnel (e.g. tars.myclosr.site) — auto-starts tunnel on boot when set
+tunnel_hostname =
 
 [UI]
 # On-device display width in pixels (3.5" = 480, 5–7" = 800)
@@ -298,6 +330,33 @@ rightForearmOffset = 0
 rightHandMin = 300
 rightHandMax = 420
 rightHandOffset = 0
+
+[AWARENESS]
+# Enable 24/7 ambient awareness (face recognition + scene captioning)
+enabled = False
+# Seconds between face detection frames (3 = responsive, 10 = lower CPU)
+face_interval = 3
+# Seconds between scene descriptions via companion server (60 = once per minute)
+scene_interval = 60
+# Companion server URL for scene captioning and server-side face recognition
+server_url =
+# Face recognition mode: server (InsightFace on companion server) | local (YuNet+SFace on device)
+face_recognition = server
+# Greet people by name when they arrive after being absent
+proactive_greetings = True
+# Seconds without detection before a person is considered departed
+departure_timeout = 30
+
+[DRIVES]
+# Enable internal drives system (curiosity, social need, energy, boredom)
+enabled = False
+# How often drives tick in seconds (60 = once per minute)
+tick_interval = 60
+# Allow TARS to speak unprompted when drives are high
+proactive_speech = True
+# Quiet hours — no proactive speech during this window (24h format)
+quiet_start = 23
+quiet_end = 7
 
 [SKILL:discord]
 disabled = true

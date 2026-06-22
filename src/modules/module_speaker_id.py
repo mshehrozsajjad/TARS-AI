@@ -28,9 +28,14 @@ from modules.module_config import load_config, get_capabilities
 CONFIG = load_config()
 CAPABILITIES = get_capabilities()
 
-# Conditional import — sherpa-onnx required for speaker embedding
+# Conditional import — sherpa-onnx required for speaker embedding.
+# Check all capability sets (stt, vad, wake) since speaker ID uses sherpa
+# for WeSpeaker embeddings, not for STT processing.
 sherpa_onnx = None
-if CAPABILITIES is None or (CAPABILITIES.allowed_stt and "sherpa-onnx" in CAPABILITIES.allowed_stt):
+if CAPABILITIES is None or any(
+    "sherpa-onnx" in (getattr(CAPABILITIES, attr, None) or set())
+    for attr in ("allowed_stt", "allowed_vad", "allowed_wake")
+):
     try:
         import sherpa_onnx as _sherpa_onnx
         sherpa_onnx = _sherpa_onnx

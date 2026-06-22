@@ -349,6 +349,13 @@ if __name__ == "__main__":
     stt_manager.set_post_utterance_callback(post_utterance_callback)
     stt_manager.set_preemptive_llm_callback(process_completion)
 
+    # Register Gemini Live callback if conversation_mode is gemini_live
+    conversation_mode = CONFIG.get("GEMINI_LIVE", {}).get("conversation_mode", "standard")
+    if conversation_mode == "gemini_live":
+        from modules.module_main import gemini_live_callback
+        stt_manager.set_gemini_live_callback(gemini_live_callback)
+        queue_message("LOAD: Gemini Live mode enabled — bypassing local STT")
+
     # === Speaker ID (optional) ===
     if CONFIG['STT'].get('speaker_id_enabled', 'False').lower() == 'true':
         try:
@@ -401,6 +408,36 @@ if __name__ == "__main__":
     # === Servo Initialization ===
     startup_initialization()
 
+    # === Drives System (internal mood/needs) ===
+    drives_manager = None
+    if CONFIG.get('DRIVES', {}).get('enabled', 'false').lower() == 'true':
+        try:
+            from modules.module_drives import DrivesManager
+            drives_manager = DrivesManager(config=CONFIG, battery_module=battery, ui_manager=ui_manager)
+            drives_manager.start()
+            queue_message("LOAD: Drives system started")
+        except Exception as e:
+            queue_message(f"WARNING: Drives system not available: {e}")
+
+    # === Awareness System (24/7 face recognition + scene captioning) ===
+    awareness_manager = None
+    if CONFIG.get('AWARENESS', {}).get('enabled', 'false').lower() == 'true':
+        try:
+            from modules.module_awareness import AwarenessManager
+            awareness_manager = AwarenessManager(config=CONFIG, ui_manager=ui_manager)
+            awareness_manager.start()
+            queue_message("LOAD: Awareness system started")
+        except Exception as e:
+            queue_message(f"WARNING: Awareness system not available: {e}")
+
+    # === Body State (unified nervous system state layer) ===
+    body_state_manager = None
+    try:
+        from modules.module_body_state import BodyStateManager
+        body_state_manager = BodyStateManager(config=CONFIG, battery_module=battery)
+    except Exception as e:
+        queue_message(f"WARNING: Body state system not available: {e}")
+
     # === Main Loop ===
     try:
         queue_message(f"LOAD: TARS-AI OS: {VERSION} running on {RASPBERRY_VERSION.upper()}")
@@ -409,6 +446,13 @@ if __name__ == "__main__":
         register_stt_manager(stt_manager)
         stt_manager.start()
         set_tars_state(TarsState.STANDBY)
+
+        # Start idle fidgets (body-autopilot layer)
+        try:
+            from modules.module_gestures import start_idle_fidgets
+            start_idle_fidgets()
+        except Exception as e:
+            queue_message(f"WARNING: Idle fidgets not available: {e}")
 
         while not shutdown_event.is_set():
             time.sleep(0.1)
@@ -430,6 +474,12 @@ if __name__ == "__main__":
         except Exception:
             pass
         stt_manager.stop()
+        # Stop awareness system
+        if awareness_manager is not None:
+            awareness_manager.stop()
+        # Stop drives system
+        if drives_manager is not None:
+            drives_manager.stop()
         # Stop speaker ID if running
         try:
             from modules.module_speaker_id import get_speaker_id_manager

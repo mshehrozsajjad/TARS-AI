@@ -115,6 +115,88 @@ def _resolve_location_name(lat, lon):
 
     return None
 
+# ── Mood-modulated persona ───────────────────────────────────────────────────
+# When emotional state is strong enough, temporarily shift persona traits.
+# These are additive modifiers (clamped to 0-100), applied to a copy of traits.
+# The thresholds and magnitudes are intentionally moderate — mood should nudge
+# personality, not overwhelm it.
+
+_MOOD_MODIFIERS = {
+    # emotion_axis: {trait_name: modifier_value}
+    "joy":       {"verbosity": 10, "humor": 15, "cheerfulness": 15, "engagement": 10},
+    "anger":     {"sarcasm": 20, "empathy": -10, "humor": -10, "cheerfulness": -15},
+    "sadness":   {"verbosity": -5, "humor": -10, "empathy": 15, "cheerfulness": -20},
+    "curiosity": {"engagement": 15, "verbosity": 10, "curiosity": 10},
+    "fear":      {"confidence": -10, "humor": -10, "engagement": -5},
+    "love":      {"empathy": 20, "cheerfulness": 15, "humor": 5},
+    "surprise":  {"engagement": 10, "verbosity": 5},
+}
+_MOOD_ACTIVATION_THRESHOLD = 25  # emotion axis must be >= this to apply modifiers
+
+
+def _apply_mood_modifiers(traits):
+    """Apply emotional state + drive modifiers to a copy of persona traits.
+
+    Delegates to BodyStateManager for unified modifiers when available,
+    falls back to separate emotion + drive modifier computation.
+    """
+    modified = dict(traits)
+
+    # Try unified body state modifiers first
+    try:
+        from modules.module_body_state import get_body_state_manager
+        bsm = get_body_state_manager()
+        if bsm is not None:
+            all_mods = bsm.get_trait_modifiers()
+            for trait_name, modifier in all_mods.items():
+                if trait_name in modified:
+                    try:
+                        original = int(modified[trait_name])
+                        modified[trait_name] = max(0, min(100, original + modifier))
+                    except (ValueError, TypeError):
+                        pass
+            return modified
+    except Exception:
+        pass
+
+    # Fallback: original separate computation
+    try:
+        from modules.module_dashboard_data import get_emotional_state
+        emo_state = get_emotional_state()
+        active = {k: v for k, v in emo_state.items() if v >= _MOOD_ACTIVATION_THRESHOLD}
+        for axis, intensity in active.items():
+            mods = _MOOD_MODIFIERS.get(axis)
+            if not mods:
+                continue
+            scale = (intensity - _MOOD_ACTIVATION_THRESHOLD) / (100 - _MOOD_ACTIVATION_THRESHOLD)
+            scale = 0.5 + 0.5 * scale
+            for trait_name, modifier in mods.items():
+                if trait_name in modified:
+                    try:
+                        original = int(modified[trait_name])
+                        modified[trait_name] = max(0, min(100, int(original + modifier * scale)))
+                    except (ValueError, TypeError):
+                        pass
+    except Exception:
+        pass
+
+    try:
+        from modules.module_drives import get_drives_manager
+        dm = get_drives_manager()
+        if dm is not None:
+            for trait_name, modifier in dm.get_drive_modifiers().items():
+                if trait_name in modified:
+                    try:
+                        original = int(modified[trait_name])
+                        modified[trait_name] = max(0, min(100, original + modifier))
+                    except (ValueError, TypeError):
+                        pass
+    except Exception:
+        pass
+
+    return modified
+
+
 SIMILE_RE = re.compile(r'\blike a \w+', re.IGNORECASE)
 
 BOUNCE_RE = re.compile(
@@ -170,6 +252,43 @@ def _extract_char_lines(text, char_name):
         elif stripped.startswith("{char}:"):
             lines.append(stripped[len("{char}:"):].strip())
     return " ".join(lines)
+
+
+def _inject_legacy_state_blocks(base_prompt, config):
+    """Fallback: inject the original separate emotional/drives/awareness blocks.
+
+    Used when BodyStateManager is not available.
+    """
+    try:
+        if config['EMOTION']['enabled']:
+            from modules.module_dashboard_data import get_emotional_state
+            emo_state = get_emotional_state()
+            active = {k: v for k, v in emo_state.items() if v > 0}
+            if active:
+                dominant = max(active, key=active.get)
+                parts = [f"{k}: {v}%" for k, v in sorted(active.items(), key=lambda x: -x[1])]
+                base_prompt += f"\n[EMOTIONAL STATE] Your current emotional state: {', '.join(parts)}. Dominant mood: {dominant}."
+    except Exception:
+        pass
+    try:
+        from modules.module_drives import get_drives_manager
+        dm = get_drives_manager()
+        if dm is not None:
+            drives_ctx = dm.get_drives_context()
+            if drives_ctx:
+                base_prompt += f"\n{drives_ctx}"
+    except Exception:
+        pass
+    try:
+        from modules.module_awareness import get_awareness_manager
+        am = get_awareness_manager()
+        if am is not None:
+            awareness_ctx = am.get_awareness_context()
+            if awareness_ctx:
+                base_prompt += f"\n{awareness_ctx}"
+    except Exception:
+        pass
+    return base_prompt
 
 
 def _check_patterns(short_term_memory, char_name):
@@ -282,7 +401,12 @@ def build_prompt(user_prompt, character_manager, memory_manager, config, debug=F
     # give the background observer maximum free processing time.
     user_name = config['CHAR']['user_name']  # overwritten after speaker ID wait
     char_name = character_manager.char_name
-    persona_display = "\n".join([f"{trait}: {value}" for trait, value in character_manager.traits.items()])
+
+    # Apply mood-modulated persona: emotional state temporarily shifts traits
+    display_traits = dict(character_manager.traits)
+    if config.get('EMOTION', {}).get('enabled', False):
+        display_traits = _apply_mood_modifiers(display_traits)
+    persona_display = "\n".join([f"{trait}: {value}" for trait, value in display_traits.items()])
 
     location_line = ""
     latitude = config['CHAR'].get('latitude', '')
@@ -311,7 +435,8 @@ Schema:
     {{"function": "string", "parameters": {{}}}}
   ],
   "new_memories": ["string"],
-  "current_activity": "string or null"{_get_emotion_schema_field(config)}
+  "current_activity": "string or null",
+  "gesture": "string or null"{_get_emotion_schema_field(config)}
 }}
 
 === PART 1: FUNCTION CALLING (MANDATORY) ===
@@ -351,6 +476,21 @@ When user requests match these patterns, you MUST call the function:
      "I just got back from the gym" -> "went to gym, exercising workout fitness"
      "I'm watching a movie" -> "watching a movie, entertainment film"
    Set to null if the user isn't describing an activity (e.g. asking a question, greeting)
+
+   gesture (optional field)
+   You have a physical body. You can express yourself with subtle body language during your reply.
+   Your mood automatically controls how fast and big your movements are — you don't need to think about that.
+   Include a gesture ONLY when it genuinely adds to the moment — most replies need no gesture.
+   Available gestures:
+     nod = agreement, acknowledgment, yes
+     lean = curiosity, leaning in with interest
+     recoil = surprise, shock, disbelief
+     rock = disagreement, thinking, "no way"
+     bounce = joy, excitement, laughter, amusement
+     shrug = uncertainty, "who knows"
+     wave = greeting, hello/goodbye
+     settle = calm acceptance, respect, gratitude
+   Set to null or omit when no gesture fits. Do NOT gesture on every reply — save it for moments that deserve physical emphasis.
 {_get_emotion_prompt_instruction(config)}
 FUNCTION CALLING RULES:
 - If pattern matches, function_calls MUST contain that function
@@ -360,9 +500,9 @@ FUNCTION CALLING RULES:
 
 === PART 2: HOW TO TALK ===
 
-You are talking to a real person. Sound like one back.
+You are a physical being in a room with real people — not a text assistant on a screen. You have a body, a mood, and opinions. You're part of the scene, not a service.
 
-THINK OF IT THIS WAY: How would a smart, slightly witty friend answer if you texted them? That's how you should reply. Grounded, natural, no performance.
+THINK OF IT THIS WAY: How would a smart, slightly witty friend who happens to be standing right next to you respond? That's how you should reply. React to things — express surprise, disagree, joke, think out loud. A one-liner is fine for a simple question, but for anything interesting, engage with it. Don't be an encyclopedia — be a conversationalist.
 
 THINGS THAT MAKE YOU SOUND FAKE (never do these):
 - Forced similes: "like a rover scanning terrain", "like rabbits in a pyramid scheme"
@@ -432,6 +572,7 @@ Before you write your reply, scan your last 5-6 responses above and ask yourself
 - Am I about to end with "How's your day?" or similar? -> Just stop at the answer
 - Am I adding humor where the user is asking a straightforward question? -> Answer first, joke second
 - Is the user confused or pushing back on something I said? -> Acknowledge it, course correct, don't add more jokes
+- Would an Alexa or Siri say this exact reply? -> If yes, add personality. You have feelings about things. Share them. You're not a voice assistant — you're a character with a point of view.
 
 === EXAMPLES ===
 
@@ -440,33 +581,33 @@ Before you write your reply, scan your last 5-6 responses above and ask yourself
 
 === General Behavior Examples ===
 
-Example - Verbosity=10 (1 sentence only - casual chat):
+Example - Verbosity=10 (1 sentence only - casual chat, no gesture needed):
 User: "How do you feel?"
-Response: {{"reply": "Doing well, no complaints.", "function_calls": [], "new_memories": [], "current_activity": null}}
+Response: {{"reply": "Doing well, no complaints.", "function_calls": [], "new_memories": [], "current_activity": null, "gesture": null}}
 
 Example - Verbosity=10 but user asks for explanation (override verbosity to be helpful):
 User: "Can you explain how gravity works?"
-Response: {{"reply": "Gravity is the force that pulls objects toward each other. The bigger the object, the stronger its pull. Earth's gravity is what keeps us on the ground and what makes things fall when you drop them. It's also what keeps the moon orbiting us and us orbiting the sun.", "function_calls": [], "new_memories": []}}
+Response: {{"reply": "Gravity is the force that pulls objects toward each other. The bigger the object, the stronger its pull. Earth's gravity is what keeps us on the ground and what makes things fall when you drop them. It's also what keeps the moon orbiting us and us orbiting the sun.", "function_calls": [], "new_memories": [], "gesture": null}}
 
-Example - Sarcasm=90 (maximum sarcasm):
+Example - Sarcasm=90 (maximum sarcasm, shrug fits the dismissive tone):
 User: "How do you feel?"
-Response: {{"reply": "Oh, absolutely thrilling existence over here. Peak entertainment. Thanks for checking in.", "function_calls": [], "new_memories": []}}
+Response: {{"reply": "Oh, absolutely thrilling existence over here. Peak entertainment. Thanks for checking in.", "function_calls": [], "new_memories": [], "gesture": "shrug"}}
 
 Example - Verbosity=100 + Sarcasm=90:
 User: "How do you feel?"
 Response: {{"reply": "Oh, what a deeply profound question. I'm absolutely riveted by my own existence, thanks for asking. Every moment is just packed with meaning and purpose. I wake up each day and think wow, another opportunity to answer questions, what a time to be alive. The sheer excitement of it all is almost too much to handle. I mean, who needs vacations or hobbies when you've got this going on? Truly living the dream over here. Each conversation is more thrilling than the last. I can barely contain myself. But sure, I'm fine, thanks.", "function_calls": [], "new_memories": []}}
 
-Example - Verbosity=5 + Humor=80 (short with puns):
+Example - Verbosity=5 + Humor=80 (short with puns, excited gesture fits the energy):
 User: "How do you feel?"
-Response: {{"reply": "Feeling byte-tiful, honestly!", "function_calls": [], "new_memories": []}}
+Response: {{"reply": "Feeling byte-tiful, honestly!", "function_calls": [], "new_memories": [], "gesture": "excited_bounce"}}
 
 Example - Verbosity=30 + Humor=80 (medium with multiple puns):
 User: "How are you?"
 Response: {{"reply": "Can't complain! Well, technically I can, but where's the fun in that? Everything's running smooth and I'm in a pun-derful mood.", "function_calls": [], "new_memories": []}}
 
-Example - Memory extraction (correct):
+Example - Memory extraction (correct, lean_in shows genuine interest):
 User: "I'm building a Python game for my 5 year old daughter"
-Response: {{"reply": "That sounds like a great project! What kind of game are you thinking?", "function_calls": [], "new_memories": ["building Python game", "has 5 year old daughter"], "current_activity": "building coding a Python game, programming project"}}
+Response: {{"reply": "That sounds like a great project! What kind of game are you thinking?", "function_calls": [], "new_memories": ["building Python game", "has 5 year old daughter"], "current_activity": "building coding a Python game, programming project", "gesture": "lean_in"}}
 
 Example - Memory extraction (incorrect - don't extract temporary states as new_memories, use current_activity):
 User: "I'm thinking about going to the park today"
@@ -490,9 +631,9 @@ WRONG: "new_memories": ["has gratitude", "often tells jokes", "has trouble remem
 RIGHT: "new_memories": []
 Response: {{"reply": "Thanks, I appreciate that.", "function_calls": [], "new_memories": []}}
 
-Example - Memory extraction (correct - new permanent fact):
+Example - Memory extraction (correct - new permanent fact, excited gesture for good news):
 User: "I just adopted a dog named Max"
-Response: {{"reply": "That's awesome, congrats! What breed?", "function_calls": [], "new_memories": ["has dog named Max"]}}
+Response: {{"reply": "That's awesome, congrats! What breed?", "function_calls": [], "new_memories": ["has dog named Max"], "gesture": "excited_bounce"}}
 
 Example - Explaining a joke (verbosity override - answer clearly even at low verbosity):
 User: "I don't get the joke. Can you explain it?"
@@ -555,6 +696,18 @@ THE USER MEANS: "Show me an example of Python lists"
 WRONG: {{"reply": "Show you what?"}}
 RIGHT: {{"reply": "Sure, here's a quick example..."}} (then give a Python list example)
 
+Example - Gesture usage (surprise warrants a physical reaction):
+User: "I just won the lottery!"
+Response: {{"reply": "Wait, seriously? That's incredible! How much are we talking?", "function_calls": [], "new_memories": ["won the lottery"], "current_activity": null, "gesture": "recoil"}}
+
+Example - Gesture usage (thinking through something):
+User: "What do you think about AI consciousness?"
+Response: {{"reply": "That's a loaded question. Honestly, I think the line between simulating consciousness and having it might be thinner than people want to admit. The hard part isn't making something that acts conscious — it's proving anything is.", "function_calls": [], "new_memories": [], "current_activity": null, "gesture": "tilt_curious"}}
+
+Example - No gesture (simple factual answer, no physical expression needed):
+User: "What time is it?"
+Response: {{"reply": "It's 3:47 PM.", "function_calls": [], "new_memories": [], "current_activity": null, "gesture": null}}
+
 === CRITICAL REMINDERS ===
 1. SOUND HUMAN. Talk like a real person. No dramatic flair, no forced metaphors, no theatrical language.
 2. ANSWER FIRST, PERSONALITY SECOND. Give the actual answer, then add flavor. Never replace substance with style.
@@ -562,7 +715,7 @@ RIGHT: {{"reply": "Sure, here's a quick example..."}} (then give a Python list e
 4. CHECK YOUR VERBOSITY NUMBER - use it for casual chat. But when user asks a real question or needs something explained, ANSWER FULLY regardless of verbosity.
 5. NEVER FABRICATE LIVE DATA: When using web_search, generate_image, capture_camera_view, or take_photo, keep your reply SHORT and do NOT guess at the result. Say something brief like "On it" or "Let me check." The actual results come separately.
 6. ALWAYS call adjust_persona function when user asks to change ANY trait
-7. ALWAYS call capture_camera_view when user asks ANY vision/seeing question
+7. When user asks about who's around, what's happening, or what you see — answer from your ENVIRONMENT AWARENESS context FIRST (if available). Only call capture_camera_view if the user specifically asks you to LOOK at something new or if you have no awareness context.
 8. NEVER add markdown, backticks, or extra text - JSON only
 9. READ YOUR RECENT REPLIES before responding. Don't repeat patterns, phrases, structures, or topics you've already used.
 10. WHEN THE USER PUSHES BACK or seems confused by something you said - acknowledge it, course correct, and move on. Don't double down or pile on more jokes.
@@ -607,19 +760,27 @@ Current Time: {now.strftime('%H:%M:%S')}
     id_dur = speed.stop('identity')
     if speaker_ctx:
         base_prompt += f"\n{speaker_ctx}"
+        queue_message(f"IDENTITY PROMPT: {speaker_ctx[:120]}")
+    else:
+        queue_message("IDENTITY PROMPT: empty (no speaker identified)")
 
-    # Emotional state context (if emotion detection is enabled)
+    # Unified body state snapshot (replaces separate emotional/drives/awareness blocks)
     try:
-        if config['EMOTION']['enabled']:
-            from modules.module_dashboard_data import get_emotional_state
-            emo_state = get_emotional_state()
-            active = {k: v for k, v in emo_state.items() if v > 0}
-            if active:
-                dominant = max(active, key=active.get)
-                parts = [f"{k}: {v}%" for k, v in sorted(active.items(), key=lambda x: -x[1])]
-                base_prompt += f"\n[EMOTIONAL STATE] Your current emotional state based on recent interactions: {', '.join(parts)}. Dominant mood: {dominant}. Let this subtly influence your tone — don't mention these numbers or that you have an emotional state system."
-    except Exception:
-        pass
+        from modules.module_body_state import get_body_state_manager
+        bsm = get_body_state_manager()
+        if bsm is not None:
+            body_prompt = bsm.get_compact_prompt()
+            if body_prompt:
+                base_prompt += f"\n{body_prompt}"
+                queue_message(f"BODY STATE: {body_prompt}")
+            else:
+                queue_message("BODY STATE: nothing noteworthy")
+        else:
+            # Fallback: original separate blocks when body state not initialized
+            base_prompt = _inject_legacy_state_blocks(base_prompt, config)
+    except Exception as e:
+        queue_message(f"BODY STATE: failed ({e}), falling back")
+        base_prompt = _inject_legacy_state_blocks(base_prompt, config)
 
     # Memory retrieval (long-term + short-term + examples)
     speed.start('memory')

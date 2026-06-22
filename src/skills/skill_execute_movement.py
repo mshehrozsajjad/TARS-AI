@@ -7,21 +7,40 @@ SKILL = {
     "required_params": ["movements"],
     "description": "Perform physical movements and gestures",
     "prompt": """execute_movement
-   Triggers: Use ONLY when user explicitly commands movement
-     * "walk forward", "turn left", "step back", "move backward"
-     * "go forward", "turn right"
-   Valid movements:
-     * "forward" - walk forward
-     * "backward" - walk backward
-     * "left" - turn left slowly
-     * "right" - turn right slowly
+   Triggers: Use ONLY when user explicitly commands movement or expressive gestures
+     * Movement: "walk forward", "turn left", "step back", "move backward"
+     * Gestures: "dance", "bow", "laugh", "pose", "wave", "do something fun"
+     * Expressions: "you're excited", "wiggle"
+   Valid movements (can be combined in sequence):
+     * "forward" - walk forward one step
+     * "backward" - walk backward one step
+     * "left" - turn left
+     * "right" - turn right
+     * "laugh" - bouncing laugh motion
+     * "excited" - excited rocking motion
+     * "swing_legs" - swing legs side to side
+     * "pose" - strike a dramatic pose
+     * "bow" - bow forward respectfully
+     * "tilt_right" - lean/tilt to the right
+     * "tilt_left" - lean/tilt to the left
+     * "side_side" - rock side to side
+     * "happy_dance" - full happy dance routine
+     * "neutral" - reset to standing position
+     * "wave_right" - wave with right hand
+     * "wave_left" - wave with left hand
    Do NOT infer or guess movement from suggestions or questions
-   Parameters: {{"movements": ["forward", "backward", "left", "right"]}}
+   Parameters: {{"movements": ["forward", "laugh", "bow"]}}
    Example: {{"function": "execute_movement", "parameters": {{"movements": ["forward", "forward", "left"]}}}}""",
     "examples": [
         """Example - Movement command:
 User: "Walk forward and then turn left"
 Response: {{"reply": "Moving now.", "function_calls": [{{"function": "execute_movement", "parameters": {{"movements": ["forward", "left"]}}}}], "new_memories": []}}""",
+        """Example - Expressive gesture:
+User: "Do a little dance"
+Response: {{"reply": "Watch this!", "function_calls": [{{"function": "execute_movement", "parameters": {{"movements": ["happy_dance"]}}}}], "new_memories": []}}""",
+        """Example - Emotional expression:
+User: "That's hilarious"
+Response: {{"reply": "Ha! Agreed.", "function_calls": [{{"function": "execute_movement", "parameters": {{"movements": ["laugh"]}}}}], "new_memories": []}}""",
     ],
 }
 
@@ -30,9 +49,16 @@ def _execute_movement(movements):
     """Execute a sequence of movements in a separate thread."""
     from modules.module_messageQue import queue_message
 
-    # Lazy import servo functions
     try:
-        from modules.module_servoctl import step_forward, walk_backward, turn_right_slow, turn_left_slow
+        from modules.module_movements import (
+            step_forward, walk_backward,
+            turn_right_slow, turn_left_slow,
+            laugh, excited, swing_legs,
+            pose, bow,
+            tilt_right, tilt_left, side_side,
+            happy_dance, neutral_legs,
+            wave_right, wave_left,
+        )
     except ImportError:
         queue_message("[ERROR] Servo control module not available.")
         return
@@ -42,6 +68,18 @@ def _execute_movement(movements):
         "backward": walk_backward,
         "left": turn_left_slow,
         "right": turn_right_slow,
+        "laugh": laugh,
+        "excited": excited,
+        "swing_legs": swing_legs,
+        "pose": pose,
+        "bow": bow,
+        "tilt_right": tilt_right,
+        "tilt_left": tilt_left,
+        "side_side": side_side,
+        "happy_dance": happy_dance,
+        "neutral": neutral_legs,
+        "wave_right": wave_right,
+        "wave_left": wave_left,
     }
 
     def movement_task():
@@ -52,11 +90,9 @@ def _execute_movement(movements):
                     queue_message(f"[INFO] Executing movement {i}/{len(movements)}: {move}")
                     action_function()
                 else:
-                    queue_message(f"[ERROR] Movement '{move}' not found in action_map.")
+                    queue_message(f"[ERROR] Unknown movement '{move}'")
         except Exception as e:
-            queue_message(f"[ERROR] Unexpected error while executing movements: {e}")
-        finally:
-            queue_message(f"[DEBUG] Thread completed for movements: {movements}")
+            queue_message(f"[ERROR] Movement failed: {e}")
 
     thread = threading.Thread(target=movement_task, daemon=True)
     thread.start()
@@ -71,5 +107,7 @@ def execute(parameters, context):
 
     movements = parameters.get("movements", [])
     if movements:
-        _execute_movement(movements)
+        thread = _execute_movement(movements)
+        if thread is not None:
+            thread.join(timeout=30)
     return None

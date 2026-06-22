@@ -957,6 +957,331 @@ def camera_feed():
     from flask import Response
     return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
+
+@flask_app.route('/api/dnd', methods=['GET'])
+def get_dnd_status():
+    """Get current DND (Do Not Disturb) state."""
+    try:
+        from modules.module_state import get_stt_manager
+        stt = get_stt_manager()
+        paused = stt.is_paused() if stt else False
+        return jsonify({"paused": paused})
+    except Exception:
+        return jsonify({"paused": False})
+
+
+@flask_app.route('/api/dnd', methods=['POST'])
+def toggle_dnd():
+    """Toggle DND mode — pauses/resumes the microphone."""
+    try:
+        from modules.module_state import get_stt_manager, set_tars_state, TarsState
+        stt = get_stt_manager()
+        if stt is None:
+            return jsonify({"error": "STT manager not available"}), 503
+
+        data = request.get_json(silent=True) or {}
+        paused = data.get('paused', not stt.is_paused())
+
+        if paused:
+            stt.pause()
+            set_tars_state(TarsState.STANDBY)
+            queue_message("DND: Microphone paused (Do Not Disturb ON)")
+        else:
+            stt.resume()
+            queue_message("DND: Microphone resumed (Do Not Disturb OFF)")
+
+        # Update Lite UI DND indicator
+        try:
+            import modules.module_main as _main
+            ui = getattr(_main, 'ui_manager', None)
+            if ui and hasattr(ui, 'set_dnd'):
+                ui.set_dnd(paused)
+        except Exception:
+            pass
+
+        return jsonify({"success": True, "paused": paused})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@flask_app.route('/api/awareness', methods=['GET'])
+def awareness_status():
+    """Debug endpoint — check awareness system state."""
+    try:
+        from modules.module_awareness import get_awareness_manager
+        am = get_awareness_manager()
+        if am is None:
+            return jsonify({"status": "not running", "reason": "AwarenessManager singleton is None"})
+        return jsonify({
+            "status": "running",
+            "enabled": am._enabled,
+            "face_mode": am._face_mode,
+            "server_url": am._server_url,
+            "present_people": am.get_present_people(),
+            "scene_description": am.get_scene_description(),
+            "awareness_context": am.get_awareness_context(),
+            "face_recognizer_loaded": am._face_recognizer is not None,
+            "known_faces": am._face_recognizer.known_names if am._face_recognizer else [],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@flask_app.route('/api/faces', methods=['GET'])
+def list_faces():
+    """List all enrolled faces."""
+    from modules.module_config import load_config as _lc
+    _cfg = _lc()
+    _face_mode = _cfg.get('AWARENESS', {}).get('face_recognition', 'server')
+    server_url = _cfg.get('AWARENESS', {}).get('server_url', '')
+
+    if _face_mode == "server" and server_url:
+        try:
+            import requests as _req
+            headers = {}
+            api_key = os.environ.get('EXTERNAL_API_KEY', '')
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+            resp = _req.get(f"{server_url}/face/list", headers=headers, timeout=5)
+            if resp.status_code == 200:
+                return jsonify(resp.json())
+        except Exception as e:
+            return jsonify({"error": f"Server unreachable: {e}"}), 503
+
+    try:
+        from modules.module_awareness import HeadlessFaceRecognizer
+        recognizer = HeadlessFaceRecognizer()
+        return jsonify({"faces": recognizer.known_names})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+def _train_face_server(name, num_samples, config):
+    """Train a face via companion server's InsightFace."""
+    import requests as _req
+    import io as _io
+
+    server_url = config.get('AWARENESS', {}).get('server_url', '')
+    if not server_url:
+        return jsonify({"error": "server_url not configured in [AWARENESS]"}), 400
+
+    try:
+        from UI.module_ui_camera import CameraModule
+        camera = CameraModule(640, 480)
+    except Exception as e:
+        return jsonify({"error": f"Camera not available: {e}"}), 503
+
+    # Wait for camera frame
+    if camera._frame is None:
+        for _ in range(50):
+            time.sleep(0.1)
+            if camera._frame is not None:
+                break
+        if camera._frame is None:
+            return jsonify({"error": "Camera has no frames yet"}), 503
+
+    headers = {}
+    api_key = os.environ.get('EXTERNAL_API_KEY', '')
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    enrolled = 0
+    for i in range(num_samples):
+        try:
+            jpeg = camera.capture_bytes(timeout=2)
+            if jpeg is None:
+                continue
+            files = {'image': ('frame.jpg', _io.BytesIO(jpeg), 'image/jpeg')}
+            resp = _req.post(
+                f"{server_url}/face/train",
+                files=files,
+                data={'name': name},
+                headers=headers,
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                enrolled += 1
+                queue_message(f"FACE TRAIN: Server sample {enrolled}/{num_samples}")
+            elif resp.status_code == 400:
+                pass  # No face in this frame
+            time.sleep(0.15)
+        except Exception as e:
+            queue_message(f"WARNING: Server face train failed: {e}")
+            continue
+
+    if enrolled < 3:
+        return jsonify({"error": f"Only enrolled {enrolled} samples (need at least 3)"}), 400
+
+    queue_message(f"FACE: Enrolled '{name}' via server ({enrolled} samples)")
+    return jsonify({"status": "ok", "name": name, "samples": enrolled})
+
+
+@flask_app.route('/api/faces/train', methods=['POST'])
+def train_face():
+    """Enroll a face by capturing frames from the live camera.
+
+    POST /api/faces/train with JSON body: {"name": "Cooper", "samples": 10}
+    Captures N frames from the camera, detects the largest face in each,
+    averages the embeddings, and saves to known_faces.npz.
+    """
+    data = request.get_json()
+    if not data or not data.get('name'):
+        return jsonify({"error": "name is required"}), 400
+
+    name = data['name'].strip()
+    num_samples = int(data.get('samples', 10))
+
+    # Check face recognition mode
+    from modules.module_config import load_config as _lc
+    _cfg = _lc()
+    _face_mode = _cfg.get('AWARENESS', {}).get('face_recognition', 'server')
+
+    # Server mode: capture JPEGs and POST to companion server /face/train
+    if _face_mode == "server":
+        return _train_face_server(name, num_samples, _cfg)
+
+    # Local mode: on-device YuNet+SFace
+    try:
+        import cv2
+        import numpy as np
+        from modules.module_awareness import _ensure_models, _MODELS_DIR, _FACES_DIR, _DB_FILE
+    except ImportError as e:
+        return jsonify({"error": f"Missing dependency: {e}"}), 500
+
+    # Use the existing CameraModule singleton (camera is already running in TARS)
+    try:
+        from UI.module_ui_camera import CameraModule
+        camera = CameraModule(640, 480)  # singleton — returns the existing instance
+        queue_message(f"FACE TRAIN: Camera singleton running={camera.running}, frame={'yes' if camera._frame else 'no'}")
+        # Wait for camera to produce its first frame (up to 5 seconds)
+        if camera._frame is None:
+            for _ in range(50):
+                time.sleep(0.1)
+                if camera._frame is not None:
+                    break
+            if camera._frame is None:
+                return jsonify({"error": "Camera running but no frames available yet. Try again in a few seconds."}), 503
+        queue_message(f"FACE TRAIN: Frame ready, starting capture for '{name}'")
+    except Exception as e:
+        return jsonify({"error": f"Camera not available: {e}"}), 503
+
+    # Create face detector/recognizer directly (avoid HeadlessFaceRecognizer overhead)
+    _ensure_models()
+    yunet_path = str(_MODELS_DIR / "face_detection_yunet_2023mar.onnx")
+    sface_path = str(_MODELS_DIR / "face_recognition_sface_2021dec.onnx")
+    detector = cv2.FaceDetectorYN.create(yunet_path, "", (320, 320))
+    recognizer_sf = cv2.FaceRecognizerSF.create(sface_path, "")
+
+    # Load existing database
+    known_names = []
+    known_embeddings = []
+    if _DB_FILE.exists():
+        fdata = np.load(str(_DB_FILE), allow_pickle=True)
+        known_names = fdata['names'].tolist()
+        known_embeddings = [fdata[f'emb_{i}'] for i in range(len(known_names))]
+
+    embeddings = []
+    frames_tried = 0
+    max_attempts = num_samples * 3
+
+    import pygame as _pg
+
+    while len(embeddings) < num_samples and frames_tried < max_attempts:
+        frames_tried += 1
+        try:
+            # Get frame exactly how /camera_feed does it (that endpoint works)
+            frame = camera.get_frame()
+            if frame is None:
+                time.sleep(0.3)
+                continue
+            frame_array = _pg.surfarray.array3d(frame)
+            frame_array = np.transpose(frame_array, (1, 0, 2))
+            frame_array = np.ascontiguousarray(frame_array)
+            frame_bgr = cv2.cvtColor(frame_array, cv2.COLOR_RGB2BGR)
+
+            h, w = frame_bgr.shape[:2]
+
+            # Debug: save first frame and log dimensions
+            if frames_tried == 1:
+                debug_dir = os.path.join(os.path.dirname(BASE_DIR), 'vision')
+                os.makedirs(debug_dir, exist_ok=True)
+                debug_path = os.path.join(debug_dir, 'debug_face_train.jpg')
+                cv2.imwrite(debug_path, frame_bgr)
+                queue_message(f"FACE TRAIN: Debug frame saved to {debug_path} ({w}x{h})")
+
+            detector.setInputSize((w, h))
+            _, faces = detector.detect(frame_bgr)
+
+            num_faces = len(faces) if faces is not None else 0
+            if num_faces == 0:
+                if frames_tried <= 5:
+                    queue_message(f"FACE TRAIN: No face in frame {frames_tried} ({w}x{h})")
+                time.sleep(0.2)
+                continue
+
+            # Use the largest face
+            largest = max(faces, key=lambda f: f[2] * f[3])
+            aligned = recognizer_sf.alignCrop(frame_bgr, largest)
+            embedding = recognizer_sf.feature(aligned)
+            embeddings.append(embedding.copy())
+            queue_message(f"FACE TRAIN: Sample {len(embeddings)}/{num_samples}")
+
+            time.sleep(0.15)
+        except Exception as e:
+            queue_message(f"FACE TRAIN: Error in frame {frames_tried}: {e}")
+            time.sleep(0.2)
+            continue
+
+    if len(embeddings) < 3:
+        return jsonify({"error": f"Only captured {len(embeddings)} face samples (need at least 3). Make sure a face is clearly visible."}), 400
+
+    # Average and normalize
+    avg_embedding = np.mean(embeddings, axis=0)
+    avg_embedding = avg_embedding / np.linalg.norm(avg_embedding)
+
+    # Save to database
+    _FACES_DIR.mkdir(parents=True, exist_ok=True)
+    if name in known_names:
+        idx = known_names.index(name)
+        known_embeddings[idx] = avg_embedding
+    else:
+        known_names.append(name)
+        known_embeddings.append(avg_embedding)
+
+    save_dict = {'names': np.array(known_names, dtype=object)}
+    for i, emb in enumerate(known_embeddings):
+        save_dict[f'emb_{i}'] = emb
+    np.savez(str(_DB_FILE), **save_dict)
+
+    queue_message(f"FACE: Enrolled '{name}' ({len(embeddings)} samples)")
+    return jsonify({"status": "ok", "name": name, "samples": len(embeddings)})
+
+
+@flask_app.route('/api/faces/<name>', methods=['DELETE'])
+def delete_face(name):
+    """Delete an enrolled face."""
+    try:
+        from modules.module_awareness import HeadlessFaceRecognizer, _FACES_DIR, _DB_FILE
+        recognizer = HeadlessFaceRecognizer()
+
+        if name not in recognizer.known_names:
+            return jsonify({"error": f"Face '{name}' not found"}), 404
+
+        idx = recognizer.known_names.index(name)
+        recognizer.known_names.pop(idx)
+        recognizer.known_embeddings.pop(idx)
+
+        _FACES_DIR.mkdir(parents=True, exist_ok=True)
+        save_dict = {'names': np.array(recognizer.known_names, dtype=object)}
+        for i, emb in enumerate(recognizer.known_embeddings):
+            save_dict[f'emb_{i}'] = emb
+        np.savez(str(_DB_FILE), **save_dict)
+
+        queue_message(f"FACE: Deleted '{name}'")
+        return jsonify({"status": "ok", "deleted": name})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @flask_app.route('/audio_stream')
 def audio_stream():
     """
@@ -1819,7 +2144,11 @@ def _install_cloudflared():
 
 
 def _start_tunnel():
-    """Start cloudflared quick tunnel in background. Returns (success, url_or_error)."""
+    """Start cloudflared tunnel in background. Returns (success, url_or_error).
+
+    Uses a named tunnel if tunnel_name is configured (static URL),
+    otherwise falls back to a quick tunnel (random trycloudflare.com URL).
+    """
     global _tunnel_process, _tunnel_url
     with _tunnel_lock:
         # Already running?
@@ -1834,48 +2163,107 @@ def _start_tunnel():
             return False, 'cloudflared not installed'
 
         port = CONFIG['ACCESS'].get('webui_port', 80)
+        tunnel_name = CONFIG['ACCESS'].get('tunnel_name', '').strip()
+
+        if tunnel_name:
+            return _start_named_tunnel(bin_path, port, tunnel_name)
+        else:
+            return _start_quick_tunnel(bin_path, port)
+
+
+def _start_named_tunnel(bin_path, port, tunnel_name):
+    """Start a named Cloudflare tunnel (static URL)."""
+    global _tunnel_process, _tunnel_url
+
+    hostname = CONFIG['ACCESS'].get('tunnel_hostname', '').strip()
+    if hostname:
+        url = f'https://{hostname}'
+    else:
+        url = f'https://{tunnel_name} (set tunnel_hostname in config)'
+
+    # Write a minimal config for the named tunnel to route traffic to the local port
+    import tempfile
+    config_content = f"url: http://localhost:{port}\n"
+    config_file = tempfile.NamedTemporaryFile(mode='w', suffix='.yml', prefix='cloudflared_', delete=False)
+    config_file.write(config_content)
+    config_file.close()
+
+    try:
+        proc = _sp.Popen(
+            [bin_path, 'tunnel', '--config', config_file.name, 'run', tunnel_name],
+            stdout=_sp.PIPE, stderr=_sp.PIPE, text=True
+        )
+    except Exception as e:
+        return False, str(e)
+
+    # Wait briefly and verify it's running
+    import time
+    time.sleep(2)
+    if proc.poll() is not None:
+        stderr = proc.stderr.read()
+        return False, f'Named tunnel failed to start: {stderr}'
+
+    _tunnel_process = proc
+    _tunnel_url = url
+
+    def _drain():
         try:
-            proc = _sp.Popen(
-                [bin_path, 'tunnel', '--url', f'http://localhost:{port}'],
-                stdout=_sp.PIPE, stderr=_sp.PIPE, text=True
-            )
-        except Exception as e:
-            return False, str(e)
-
-        # Read stderr lines until we find the URL (cloudflared prints it there)
-        url = None
-        url_pattern = re.compile(r'https://[a-zA-Z0-9-]+\.trycloudflare\.com')
-        import time
-        deadline = time.time() + 30
-        while time.time() < deadline:
-            line = proc.stderr.readline()
-            if not line:
-                if proc.poll() is not None:
-                    break
-                continue
-            match = url_pattern.search(line)
-            if match:
-                url = match.group(0)
-                break
-
-        if not url:
-            proc.kill()
-            return False, 'Could not get tunnel URL (cloudflared may have failed to start)'
-
-        _tunnel_process = proc
-        _tunnel_url = url
-
-        # Background thread to drain stderr so the process doesn't block
-        def _drain():
-            try:
-                for _ in proc.stderr:
-                    pass
-            except Exception:
+            for _ in proc.stderr:
                 pass
-        threading.Thread(target=_drain, daemon=True).start()
+        except Exception:
+            pass
+    threading.Thread(target=_drain, daemon=True).start()
 
-        queue_message(f"SYSTEM: Remote access tunnel active: {url}")
-        return True, url
+    queue_message(f"SYSTEM: Named tunnel '{tunnel_name}' active: {url}")
+    return True, url
+
+
+def _start_quick_tunnel(bin_path, port):
+    """Start a cloudflared quick tunnel (random URL)."""
+    global _tunnel_process, _tunnel_url
+
+    try:
+        proc = _sp.Popen(
+            [bin_path, 'tunnel', '--url', f'http://localhost:{port}'],
+            stdout=_sp.PIPE, stderr=_sp.PIPE, text=True
+        )
+    except Exception as e:
+        return False, str(e)
+
+    # Read stderr lines until we find the URL (cloudflared prints it there)
+    url = None
+    url_pattern = re.compile(r'https://[a-zA-Z0-9-]+\.trycloudflare\.com')
+    import time
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        line = proc.stderr.readline()
+        if not line:
+            if proc.poll() is not None:
+                break
+            continue
+        match = url_pattern.search(line)
+        if match:
+            url = match.group(0)
+            break
+
+    if not url:
+        proc.kill()
+        return False, 'Could not get tunnel URL (cloudflared may have failed to start)'
+
+    _tunnel_process = proc
+    _tunnel_url = url
+
+    # Background thread to drain stderr so the process doesn't block
+    def _drain():
+        try:
+            for _ in proc.stderr:
+                pass
+        except Exception:
+            pass
+    threading.Thread(target=_drain, daemon=True).start()
+
+    queue_message(f"SYSTEM: Remote access tunnel active: {url}")
+    return True, url
 
 
 def _stop_tunnel_internal():
@@ -3142,5 +3530,20 @@ def _parse_movement_steps(src):
 def start_flask_app(port=None):
     if port is None:
         port = CONFIG['ACCESS'].get('webui_port', 80)
+
+    # Auto-start named tunnel if configured
+    tunnel_name = CONFIG['ACCESS'].get('tunnel_name', '').strip()
+    if tunnel_name:
+        def _auto_tunnel():
+            import time
+            time.sleep(2)  # Let Flask bind the port first
+            if _cloudflared_bin():
+                ok, result = _start_tunnel()
+                if not ok:
+                    queue_message(f"WARNING: Auto-start tunnel failed: {result}")
+            else:
+                queue_message("INFO: cloudflared not installed, skipping auto-start tunnel")
+        threading.Thread(target=_auto_tunnel, daemon=True).start()
+
     queue_message(f"INFO: Starting Flask app on port {port}...")
     socketio.run(flask_app, host="0.0.0.0", port=port, log_output=False, allow_unsafe_werkzeug=True)

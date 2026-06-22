@@ -390,7 +390,9 @@ CONFIG_FILE = Path(__file__).parent / "config-server.ini"
 _CONFIG_DEFAULTS = {
     "server":     {"port": "5678", "api_key": ""},
     "services":   {"stt": "true", "tts": "true", "llm": "true", "vision": "true",
-                   "imagegen": "false", "musicgen": "false", "embeddings": "false"},
+                   "imagegen": "false", "musicgen": "false", "embeddings": "false",
+                   "facerecognition": "true"},
+    "facerecognition": {"model": "buffalo_sc"},
     "stt":        {"whisper_model": "large-v3", "compute_type": "auto", "vad_filter": "true", "device": "auto"},
     "llm":        {"model": "Qwen/Qwen3-4B",
                    "dtype": "auto", "quantize": "none", "backend": "auto",
@@ -483,6 +485,7 @@ _ENDPOINT_SERVICE = {
     "/sdapi/": "imagegen", "/generate_image": "imagegen",
     "/generate_music": "musicgen", "/musicgen_gallery": "musicgen",
     "/v1/embeddings": "embeddings",
+    "/face/": "facerecognition",
 }
 
 
@@ -1506,6 +1509,157 @@ class EmbeddingsService:
 
 
 # ===================================================================
+# Face Recognition Service (InsightFace)
+# ===================================================================
+class FaceService:
+    """Face detection + recognition using InsightFace (ArcFace embeddings).
+
+    Stores enrolled faces in a pickle database. Supports enroll, identify, delete.
+    """
+
+    COSINE_THRESHOLD = 0.4  # InsightFace normed embeddings; higher = stricter
+
+    def __init__(self, model_name: str = "buffalo_sc"):
+        from insightface.app import FaceAnalysis
+
+        log.info(f"Loading face recognition model: {model_name}...")
+        face_dir = MODELS_DIR / "faces"
+        face_dir.mkdir(exist_ok=True)
+
+        self.model_name = model_name
+        self._db_path = face_dir / "known_faces.pkl"
+        self.app = FaceAnalysis(
+            name=model_name,
+            root=str(MODELS_DIR / "insightface"),
+            providers=['CPUExecutionProvider'],
+        )
+        self.app.prepare(ctx_id=0, det_size=(640, 640))
+
+        # Database: {name: list_of_embedding_arrays}
+        self.known_faces: dict = {}
+        self._lock = Lock()
+        self._load_database()
+        log.info(f"Face recognition loaded: {model_name} ({len(self.known_faces)} enrolled faces)")
+
+    def _load_database(self):
+        if self._db_path.exists():
+            import pickle
+            try:
+                with open(self._db_path, 'rb') as f:
+                    self.known_faces = pickle.load(f)
+            except Exception as e:
+                log.warning(f"Failed to load face database: {e}")
+                self.known_faces = {}
+
+    def _save_database(self):
+        import pickle
+        tmp = str(self._db_path) + '.tmp'
+        with open(tmp, 'wb') as f:
+            pickle.dump(self.known_faces, f)
+        os.replace(tmp, str(self._db_path))
+
+    def detect_and_identify(self, image_bytes: bytes) -> list[dict]:
+        """Detect faces and identify them against enrolled database.
+
+        Returns list of {name, confidence, bbox}.
+        """
+        import numpy as np
+        from PIL import Image
+
+        img = np.array(Image.open(BytesIO(image_bytes)).convert('RGB'))
+        # InsightFace expects BGR
+        img_bgr = img[:, :, ::-1].copy()
+
+        faces = self.app.get(img_bgr)
+        results = []
+
+        with self._lock:
+            for face in faces:
+                bbox = face.bbox.astype(int).tolist()
+                embedding = face.normed_embedding
+
+                name, confidence = self._identify(embedding)
+                results.append({
+                    "name": name,
+                    "confidence": round(float(confidence), 3),
+                    "bbox": bbox,
+                })
+
+        return results
+
+    def _identify(self, embedding) -> tuple:
+        """Match embedding against known faces. Returns (name, confidence)."""
+        import numpy as np
+
+        if not self.known_faces:
+            return "UNKNOWN", 0.0
+
+        best_name = "UNKNOWN"
+        best_score = 0.0
+
+        for name, embeddings in self.known_faces.items():
+            for known_emb in embeddings:
+                score = float(np.dot(embedding, known_emb))
+                if score > best_score:
+                    best_score = score
+                    best_name = name
+
+        if best_score < self.COSINE_THRESHOLD:
+            return "UNKNOWN", best_score
+
+        return best_name, best_score
+
+    def enroll(self, name: str, image_bytes: bytes) -> dict:
+        """Detect the largest face in the image and enroll it under the given name.
+
+        Returns {status, name, embedding_count} or raises ValueError.
+        """
+        import numpy as np
+        from PIL import Image
+
+        img = np.array(Image.open(BytesIO(image_bytes)).convert('RGB'))
+        img_bgr = img[:, :, ::-1].copy()
+
+        faces = self.app.get(img_bgr)
+        if not faces:
+            raise ValueError("No face detected in image")
+
+        # Use the largest face
+        largest = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
+        embedding = largest.normed_embedding
+
+        with self._lock:
+            if name not in self.known_faces:
+                self.known_faces[name] = []
+            self.known_faces[name].append(embedding)
+            # Keep max 20 embeddings per person
+            if len(self.known_faces[name]) > 20:
+                self.known_faces[name] = self.known_faces[name][-20:]
+            self._save_database()
+
+        count = len(self.known_faces[name])
+        log.info(f"Face enrolled: '{name}' ({count} embeddings)")
+        return {"status": "ok", "name": name, "embedding_count": count}
+
+    def delete(self, name: str) -> bool:
+        with self._lock:
+            if name in self.known_faces:
+                del self.known_faces[name]
+                self._save_database()
+                log.info(f"Face deleted: '{name}'")
+                return True
+        return False
+
+    def list_faces(self) -> list[str]:
+        with self._lock:
+            return list(self.known_faces.keys())
+
+    def unload(self):
+        self.app = None
+        self.known_faces = {}
+
+
+# ===================================================================
 # MusicGen Service (ACE-Step — music with vocals/lyrics)
 # ===================================================================
 class MusicGenService:
@@ -2411,6 +2565,58 @@ async def embeddings(request: Request):
         raise HTTPException(500, str(e))
 
 
+# -- Face Recognition Routes -------------------------------------------
+
+@app.post("/face/recognize")
+async def face_recognize(image: UploadFile = File(...)):
+    if "facerecognition" not in SERVICES:
+        raise HTTPException(503, "Face recognition service not loaded")
+    image_bytes = await image.read()
+    loop = asyncio.get_event_loop()
+    try:
+        faces = await loop.run_in_executor(
+            _INFERENCE_POOL, SERVICES["facerecognition"].detect_and_identify, image_bytes
+        )
+        return {"faces": faces}
+    except Exception as e:
+        log.error(f"Face recognition error: {traceback.format_exc()}")
+        raise HTTPException(500, str(e))
+
+
+@app.post("/face/train")
+async def face_train(image: UploadFile = File(...), name: str = Form(...)):
+    if "facerecognition" not in SERVICES:
+        raise HTTPException(503, "Face recognition service not loaded")
+    image_bytes = await image.read()
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(
+            _INFERENCE_POOL, SERVICES["facerecognition"].enroll, name, image_bytes
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        log.error(f"Face train error: {traceback.format_exc()}")
+        raise HTTPException(500, str(e))
+
+
+@app.get("/face/list")
+async def face_list():
+    if "facerecognition" not in SERVICES:
+        raise HTTPException(503, "Face recognition service not loaded")
+    return {"faces": SERVICES["facerecognition"].list_faces()}
+
+
+@app.delete("/face/{name}")
+async def face_delete(name: str):
+    if "facerecognition" not in SERVICES:
+        raise HTTPException(503, "Face recognition service not loaded")
+    if SERVICES["facerecognition"].delete(name):
+        return {"status": "ok", "deleted": name}
+    raise HTTPException(404, f"Face '{name}' not found")
+
+
 # -- Model Management --------------------------------------------------
 
 @app.get("/models/status")
@@ -2848,7 +3054,7 @@ def parse_args():
     )
     p.add_argument("--port", type=int, default=int(cfg["server"]["port"]))
     p.add_argument("--host", default="0.0.0.0")
-    p.add_argument("--services", nargs="+", choices=["stt", "tts", "llm", "vision", "imagegen", "musicgen", "embeddings"], default=None)
+    p.add_argument("--services", nargs="+", choices=["stt", "tts", "llm", "vision", "imagegen", "musicgen", "embeddings", "facerecognition"], default=None)
     p.add_argument("--no-stt", action="store_true", default=not cfg.getboolean("services", "stt"))
     p.add_argument("--no-tts", action="store_true", default=not cfg.getboolean("services", "tts"))
     p.add_argument("--no-llm", action="store_true", default=not cfg.getboolean("services", "llm"))
@@ -2949,6 +3155,9 @@ def _load_single_service(name: str, args):
     elif name == "embeddings":
         dev = resolve_service_device(cfg.get("embeddings", "device", fallback="auto"))
         SERVICES["embeddings"] = EmbeddingsService(model_name=args.embeddings_model, device=dev)
+    elif name == "facerecognition":
+        model = cfg.get("facerecognition", "model", fallback="buffalo_sc")
+        SERVICES["facerecognition"] = FaceService(model_name=model)
 
 
 _SERVICE_PACKAGES = {

@@ -82,8 +82,20 @@ if CAPABILITIES is None or (CAPABILITIES.allowed_wake and "atomik" in CAPABILITI
     except ImportError:
         pass
 
-# Sherpa-ONNX (Pi5, Pi4)
-if CAPABILITIES is None or (CAPABILITIES.allowed_stt and "sherpa-onnx" in CAPABILITIES.allowed_stt):
+# openWakeWord (Pi5, Pi4, Pi3)
+oww_Model = None
+if CAPABILITIES is None or (CAPABILITIES.allowed_wake and "openwakeword" in CAPABILITIES.allowed_wake):
+    try:
+        from openwakeword.model import Model as _oww_Model
+        oww_Model = _oww_Model
+    except ImportError:
+        pass
+
+# Sherpa-ONNX (Pi5, Pi4, or any profile using it for VAD/denoising)
+if CAPABILITIES is None or (
+    (CAPABILITIES.allowed_stt and "sherpa-onnx" in CAPABILITIES.allowed_stt) or
+    (CAPABILITIES.allowed_vad and "sherpa-onnx" in CAPABILITIES.allowed_vad)
+):
     try:
         import sherpa_onnx as _sherpa_onnx
         sherpa_onnx = _sherpa_onnx
@@ -183,6 +195,7 @@ class STTManager:
         self.utterance_callback: Optional[Callable[[str], None]] = None
         self.post_utterance_callback: Optional[Callable[[], None]] = None
         self.preemptive_llm_callback: Optional[Callable[[str], object]] = None  # fires LLM early
+        self.gemini_live_callback: Optional[Callable[[], None]] = None  # Gemini Live mode
 
         # Wake word and model settings
         self.WAKE_WORD = config.get("STT", {}).get("wake_word", "hey tar").lower()
@@ -195,6 +208,7 @@ class STTManager:
         self.sherpa_recognizer = None
         self.sherpa_vad = None
         self.sherpa_denoiser = None
+        self.oww_model = None
         self.sherpa_punctuator = None
         # Smart Turn semantic turn detection
         self.smart_turn_session = None
@@ -261,6 +275,8 @@ class STTManager:
             self._load_fastrtc_model()
         elif wake_proc == "atomik":
             self._load_atomik_model()
+        elif wake_proc == "openwakeword":
+            self._load_openwakeword_model()
         elif wake_proc == "sherpa-onnx" and not self.sherpa_recognizer:
             self._load_sherpa_onnx_model()
 
@@ -326,6 +342,60 @@ class STTManager:
         atomik_mode = CONFIG['STT'].get('atomik_mode', 'auto').strip().lower()
         mode = None if atomik_mode == 'auto' else atomik_mode
         WakeWordSystem(self.WAKE_WORD, mode=mode).createModel()
+
+    def _load_openwakeword_model(self):
+        """Load openWakeWord model for streaming wake word detection."""
+        if oww_Model is None:
+            queue_message("WARNING: openWakeWord not available (not installed — pip install openwakeword)")
+            return
+        try:
+            oww_model_name = CONFIG['STT'].get('oww_model_name', '').strip()
+            model_paths = []
+
+            if oww_model_name:
+                # Check if it's a file path to a custom model in src/stt/
+                # Try exact name first, then with .onnx/.tflite extensions
+                custom_path = os.path.join(_stt_dir(), oww_model_name)
+                candidates = [
+                    custom_path,
+                    custom_path + ".onnx",
+                    custom_path + ".tflite",
+                    oww_model_name,
+                ]
+                resolved = next((p for p in candidates if os.path.isfile(p)), None)
+                if resolved:
+                    model_paths = [resolved]
+                else:
+                    # Match against pre-trained model names by basename
+                    import openwakeword
+                    pretrained = openwakeword.get_pretrained_model_paths()
+                    match = next(
+                        (p for p in pretrained
+                         if os.path.basename(p).replace(".onnx", "").replace(".tflite", "") == oww_model_name
+                         or os.path.basename(p) == oww_model_name),
+                        None,
+                    )
+                    if match:
+                        model_paths = [match]
+                    else:
+                        available = [os.path.basename(p) for p in pretrained]
+                        queue_message(f"ERROR: openWakeWord model '{oww_model_name}' not found. Available: {available}")
+                        return
+
+            # Detect the correct constructor parameter name — older versions
+            # use "wakeword_model_paths", newer versions use "wakeword_models"
+            import inspect
+            params = inspect.signature(oww_Model.__init__).parameters
+            if "wakeword_models" in params:
+                self.oww_model = oww_Model(wakeword_models=model_paths, inference_framework="onnx")
+            else:
+                self.oww_model = oww_Model(wakeword_model_paths=model_paths)
+
+            loaded = list(self.oww_model.models.keys())
+            queue_message(f"INFO: openWakeWord loaded successfully. Models: {loaded}")
+        except Exception as e:
+            queue_message(f"ERROR: Failed to load openWakeWord model: {e}")
+            self.oww_model = None
 
     def _load_silero_model(self):
         """Load Silero STT model via Torch Hub into the stt folder."""
@@ -609,9 +679,17 @@ class STTManager:
                 is_silence, detected_speech, silent_frames = vad_func(data, detected_speech, silent_frames)
 
                 # Pre-speech timeout: if no speech detected and silence exceeds threshold, exit early
-                if not detected_speech and silent_frames >= max_silent:
+                # Extend timeout while a gesture is running — user naturally waits for it to finish
+                _gesture_running = False
+                try:
+                    from modules.module_gestures import gesture_active
+                    _gesture_running = gesture_active
+                except Exception:
+                    pass
+                if not detected_speech and silent_frames >= max_silent and not _gesture_running:
                     _, clear_bar = self._get_progress_bar()
                     clear_bar()
+                    print(f"[DEBUG] No speech after {silent_frames} frames, giving up", flush=True)
                     return None, 0
 
                 # Post-speech: VAD signaled end of turn
@@ -633,6 +711,8 @@ class STTManager:
                         if len(pre_roll_buffer) > pre_roll_frames:
                             pre_roll_buffer.pop(0)
                 else:
+                    if speech_frames == 0:
+                        print(f"[DEBUG] Speech detected! (vad={vad_method})", flush=True)
                     if speech_frames == 0 and pre_roll_buffer:
                         pre_roll_added = len(pre_roll_buffer)
                         audio_chunks.extend(pre_roll_buffer)
@@ -729,15 +809,24 @@ class STTManager:
                 time.sleep(0.1)
                 continue
             if self._detect_wake_word():
-                if self.DEBUG:
-                    queue_message("DEBUG: Wake word detected, starting transcription")
+                print("[DEBUG] Wake word returned True", flush=True)
                 STTManager._last_status_was_sleeping = False
-                # Reset sherpa VAD state to prevent heap corruption from stale native buffers
+                # Reset sherpa VAD state
                 if self.sherpa_vad is not None:
-                    self.sherpa_vad.reset()
+                    try:
+                        self.sherpa_vad.reset()
+                    except Exception as e:
+                        print(f"[DEBUG] sherpa_vad.reset() failed: {e}", flush=True)
                 # Check again if paused before transcribing
-                if not self.is_paused():
-                    self._transcribe_utterance()
+                _paused = self.is_paused()
+                print(f"[DEBUG] paused={_paused}, gemini_cb={'set' if self.gemini_live_callback else 'none'}", flush=True)
+                if not _paused:
+                    # In Gemini Live mode, skip local STT and route to Gemini callback
+                    if self.gemini_live_callback is not None:
+                        queue_message("DEBUG: Routing to Gemini Live mode")
+                        self.gemini_live_callback()
+                    else:
+                        self._transcribe_utterance()
         queue_message("INFO: STT Manager stopped.")
 
     # === Transcription Dispatch ===
@@ -746,6 +835,7 @@ class STTManager:
         """Transcribe the user's utterance using the selected STT processor."""
         try:
             if self.is_paused():
+                queue_message("DEBUG STT: Skipping transcription — paused")
                 return None
 
             processors = {
@@ -754,8 +844,11 @@ class STTManager:
                 "external": self._transcribe_with_server,
                 "openai": self._transcribe_with_openai,
                 "sherpa-onnx": self._transcribe_with_sherpa_onnx,
+                "gladia": self._transcribe_with_gladia,
+                "deepgram": self._transcribe_with_deepgram,
             }
             processor = self.config["STT"].get("stt_processor", "fastrtc")
+            queue_message(f"DEBUG STT: Dispatching to '{processor}'")
             transcribe_fn = processors.get(processor)
             if transcribe_fn is None:
                 queue_message(f"WARNING: Unknown STT processor '{processor}', falling back to FastRTC")
@@ -773,11 +866,14 @@ class STTManager:
                 speed.log(f"stt:{processor}({speed.fmt(stt_dur)})")
                 speed.start('stt_to_llm')  # Measure gap from STT done to LLM start
 
+            print(f"[DEBUG] transcribe result={'yes' if result else 'no'}, post_cb={'set' if self.post_utterance_callback else 'none'}", flush=True)
             if self.post_utterance_callback and result:
                 self.post_utterance_callback()
             return result
         except Exception as e:
-            queue_message(f"ERROR: Transcription failed: {e}")
+            print(f"[ERROR] Transcription failed: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
             return None
 
     # === Wake Word Gates ===
@@ -1079,6 +1175,26 @@ class STTManager:
 
         return self._emit_result(transcription)
 
+    def _transcribe_with_gladia(self):
+        """Stream mic audio to Gladia using persistent session with local VAD."""
+        from modules.module_gladia import transcribe_streaming
+
+        transcript = transcribe_streaming(self)
+        print(f"[DEBUG] Gladia returned: {transcript!r}", flush=True)
+        if not transcript:
+            return None
+        return self._emit_result(transcript)
+
+    def _transcribe_with_deepgram(self):
+        """Stream mic audio to Deepgram using v2 API with local VAD."""
+        from modules.module_deepgram import transcribe_streaming
+
+        transcript = transcribe_streaming(self)
+        print(f"[DEBUG] Deepgram returned: {transcript!r}", flush=True)
+        if not transcript:
+            return None
+        return self._emit_result(transcript)
+
     def _sherpa_transcribe_audio(self, audio_chunks, sample_rate=16000):
         """Denoise + transcribe int16 audio chunks with sherpa-onnx. Returns transcript string or None."""
         if not audio_chunks:
@@ -1332,6 +1448,7 @@ class STTManager:
         processors = {
             "fastrtc": self._detect_wake_word_fastrtc,
             "sherpa-onnx": self._detect_wake_word_sherpa_onnx,
+            "openwakeword": self._detect_wake_word_openwakeword,
         }
         wake_proc = self.config["STT"].get("wake_word_processor", "atomik")
         return processors.get(wake_proc, self._detect_wake_word_atomik)()
@@ -1381,6 +1498,8 @@ class STTManager:
 
             for _ in range(100):
                 if not self.running or self.shutdown_event.is_set():
+                    break
+                if self.is_paused():
                     break
 
                 # Abort wake word detection if TTS started
@@ -1443,7 +1562,11 @@ class STTManager:
         while is_tts_playing():
             time.sleep(0.05)
         while True:
+            if self.is_paused():
+                return False
             detector.listenForWakeWord()
+            if self.is_paused():
+                return False
             audio_window = np.array(list(detector.buffer)[-int(self.MODEL_RATE * 2):], dtype=np.float32)
             if self._run_wake_gates(audio_window, transcript_verify_fn=transcript_verify_fn):
                 self._handle_wake_detected()
@@ -1490,6 +1613,9 @@ class STTManager:
             audio_buffer[:] = buf.flatten()
 
             while self.running and not self.shutdown_event.is_set():
+                # Abort if paused (DND mode)
+                if self.is_paused():
+                    break
                 # Abort wake word detection if TTS started
                 if is_tts_playing():
                     break
@@ -1544,6 +1670,121 @@ class STTManager:
             return False
 
         # InputStream is now closed — safe to play audio via sd.play
+        if wake_detected:
+            self._handle_wake_detected()
+            return True
+        return False
+
+    def _detect_wake_word_openwakeword(self) -> bool:
+        """Detect wake word using openWakeWord streaming prediction."""
+        if not self.oww_model:
+            queue_message("ERROR: openWakeWord model not loaded for wake word detection.")
+            return False
+
+        self._fire_and_forget_get(f"http://127.0.0.1:{self._webui_port}/stop_talking")
+
+        # Transcript verify gate
+        transcript_verify_fn = None
+        stt_cfg = CONFIG.get('STT', {})
+        if stt_cfg.get('vad_transcript_verify', 'False').strip() == 'True':
+            transcript_verify_fn = self._build_transcript_verify_fn()
+
+        # Map sensitivity 1-10 to threshold: sens 1 → 0.80, sens 10 → 0.30
+        sensitivity = max(1, min(10, int(CONFIG["STT"]["sensitivity"])))
+        norm = (sensitivity - 1) / 9.0
+        threshold = round(max(0.30, 0.80 - norm * 0.50), 2)
+
+        if self.DEBUG:
+            queue_message(f"DEBUG: openWakeWord sensitivity={sensitivity}, threshold={threshold}")
+
+        RATE = self.MODEL_RATE
+        # openWakeWord works best with 1280-sample chunks (80ms at 16kHz)
+        chunk_size = 1280
+        wake_detected = False
+        # Track peak score for periodic debug logging
+        _debug_peak = 0.0
+        _debug_counter = 0
+
+        # Reset model buffers for a fresh detection session
+        self.oww_model.reset()
+
+        # openWakeWord needs ~16 embedding frames to stabilize its internal
+        # pipeline after reset.  Predictions during warmup are unreliable and
+        # can false-trigger on residual TTS audio or mic transients.
+        WARMUP_CHUNKS = 20  # ~1.6s at 80ms per chunk
+
+        try:
+          with ResamplingInputStream(dtype="int16") as mic:
+            # Flush stale mic audio after TTS playback
+            try:
+                from modules.module_tts import needs_mic_flush, clear_mic_flush
+                if needs_mic_flush():
+                    queue_message("DEBUG: Flushing mic audio after TTS playback")
+                    mic.flush()
+                    clear_mic_flush()
+            except Exception:
+                pass
+
+            # Warmup: feed audio to the model without checking predictions
+            for _ in range(WARMUP_CHUNKS):
+                if not self.running or self.shutdown_event.is_set():
+                    break
+                data, _ = mic.read(chunk_size)
+                self.oww_model.predict(data.flatten().astype(np.int16))
+            self.oww_model.reset()
+
+            while self.running and not self.shutdown_event.is_set():
+                if self.is_paused():
+                    break
+                if is_tts_playing():
+                    break
+
+                data, _ = mic.read(chunk_size)
+                data = self.amplify_audio(data)
+
+                # RMS silence gate — skip prediction when quiet to save CPU
+                if self._is_quiet(data):
+                    continue
+
+                # openWakeWord expects int16 numpy array
+                audio_chunk = data.flatten().astype(np.int16)
+                prediction = self.oww_model.predict(audio_chunk)
+
+                # Debug: log scores periodically so user can see what's happening
+                if self.DEBUG:
+                    for mn, sc in prediction.items():
+                        if sc > _debug_peak:
+                            _debug_peak = sc
+                    _debug_counter += 1
+                    # Log every ~25 chunks (~2 seconds) to avoid flooding
+                    if _debug_counter % 25 == 0:
+                        scores_str = ", ".join(f"{mn}={sc:.4f}" for mn, sc in prediction.items())
+                        queue_message(f"DEBUG: openWakeWord scores: {scores_str} | peak={_debug_peak:.4f} | threshold={threshold}")
+                        _debug_peak = 0.0
+
+                # Check each model's score against threshold
+                for model_name, score in prediction.items():
+                    if score >= threshold:
+                        if self.DEBUG:
+                            queue_message(f"DEBUG: openWakeWord TRIGGERED '{model_name}' score={score:.3f} (threshold={threshold})")
+
+                        # Build float32 audio window for wake gates (~2s of recent audio)
+                        audio_window = audio_chunk.astype(np.float32) / 32768.0
+                        if not self._run_wake_gates(audio_window, transcript_verify_fn=transcript_verify_fn):
+                            self.oww_model.reset()
+                            continue
+
+                        wake_detected = True
+                        break
+
+                if wake_detected:
+                    break
+
+        except sd.PortAudioError as e:
+            queue_message(f"WARNING: Audio device error in wake word detection, retrying in 2s: {e}")
+            time.sleep(2)
+            return False
+
         if wake_detected:
             self._handle_wake_detected()
             return True
@@ -1827,6 +2068,10 @@ class STTManager:
 
     def set_preemptive_llm_callback(self, callback: Callable[[str], object]):
         self.preemptive_llm_callback = callback
+
+    def set_gemini_live_callback(self, callback: Callable[[], None]):
+        """Set callback for Gemini Live mode — called instead of _transcribe_utterance."""
+        self.gemini_live_callback = callback
 
     # === Barge-In Monitoring ===
 

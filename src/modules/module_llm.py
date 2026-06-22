@@ -241,17 +241,24 @@ def _prepare_request_data(llm_backend, prompt, image_b64=None):
         user_content = prompt
 
     if llm_backend == "openai":
-        url = f"{CONFIG['LLM']['base_url']}/v1/chat/completions"
+        url = "https://api.openai.com/v1/chat/completions"
         model = CONFIG['LLM']['openai_model']
     elif llm_backend == "grok":
-        url = f"{CONFIG['LLM']['base_url']}/v1/chat/completions"
+        url = "https://api.x.ai/v1/chat/completions"
         model = CONFIG['LLM']['grok_model']
     elif llm_backend == "deepinfra":
-        url = f"{CONFIG['LLM']['base_url']}/v1/openai/chat/completions"
+        url = "https://api.deepinfra.com/v1/openai/chat/completions"
         model = CONFIG['LLM']['openai_model']
+    elif llm_backend == "gemini":
+        url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        model = CONFIG['LLM']['gemini_model']
     else:
         url = f"{CONFIG['LLM']['base_url']}/v1/chat/completions"
         model = CONFIG['LLM']['other_model']
+
+    # GPT-5 series are reasoning models that reject temperature and top_p
+    # (only default value of 1 is accepted). Detect by model name prefix.
+    _is_reasoning = model.startswith(("gpt-5", "o1", "o3", "o4"))
 
     data = {
         "model": model,
@@ -259,17 +266,21 @@ def _prepare_request_data(llm_backend, prompt, image_b64=None):
             {"role": "system", "content": CONFIG['LLM']['systemprompt']},
             {"role": "user", "content": user_content}
         ],
-        "max_tokens": CONFIG['LLM']['max_tokens'],
-        "temperature": CONFIG['LLM']['temperature'],
-        "top_p": CONFIG['LLM']['top_p'],
         "stream": True
     }
 
-    if llm_backend in ["openai", "grok", "deepinfra"]:
+    if _is_reasoning:
+        data["max_completion_tokens"] = CONFIG['LLM']['max_tokens']
+    else:
+        data["max_tokens"] = CONFIG['LLM']['max_tokens']
+        data["temperature"] = CONFIG['LLM']['temperature']
+        data["top_p"] = CONFIG['LLM']['top_p']
+
+    if llm_backend in ["openai", "grok", "deepinfra", "gemini"]:
         data["response_format"] = {"type": "json_object"}
     else:
         if CONFIG['LLM'].get('json_mode', True):
-            data["response_format"] = {"type": "json_object"}  
+            data["response_format"] = {"type": "json_object"}
 
     return url, data
 
@@ -311,6 +322,7 @@ def process_completion(prompt, image_b64=None):
         llm_backend = CONFIG['LLM']['llm_backend']
         url, data = _prepare_request_data(llm_backend, built_prompt, image_b64=image_b64)
 
+        queue_message(f"DEBUG LLM: backend={llm_backend}, model={data.get('model')}, url={url}")
         response = _http_session.post(url, headers=headers, json=data, stream=True)
         response.raise_for_status()
         _t_first_byte = None
@@ -361,10 +373,12 @@ def process_completion(prompt, image_b64=None):
             try:
                 bot_reply = _extract_text(response.json(), True)
             except Exception:
+                queue_message("DEBUG LLM: No content from streaming or fallback")
                 return None
         else:
             bot_reply = full_content.strip()
 
+        queue_message(f"DEBUG LLM: Raw response ({len(bot_reply)} chars): {bot_reply[:300]}")
         result = llm_parse_response(bot_reply)
         _t_parse = time.perf_counter()
 
@@ -685,17 +699,27 @@ def llm_execute_side_effects(parsed, user_input, source="voice", has_image=False
 
 
 def llm_process(user_input, bot_response, source="voice", has_image=False):
-    """Parse LLM response and execute side effects (legacy wrapper)."""
+    """Parse LLM response and extract reply (legacy wrapper used by vision skill).
+
+    Skips side effects (function_calls, memories) to avoid recursive tool execution
+    when the vision skill calls get_completion with a captured image.
+    """
     parsed = llm_parse_response(bot_response)
     if parsed is None:
         return "[Error: Invalid JSON from LLM. Check logs for details.]"
-    llm_execute_side_effects(parsed, user_input, source=source, has_image=has_image)
     return _sanitize_for_tts(parsed["reply"])
 
 
 def _sanitize_for_tts(text):
     if not isinstance(text, str):
         return text
+
+    # Convert Unicode smart quotes/dashes to ASCII equivalents
+    text = text.replace('\u2019', "'")   # right single quote
+    text = text.replace('\u2018', "'")   # left single quote
+    text = text.replace('\u201c', '"')   # left double quote
+    text = text.replace('\u201d', '"')   # right double quote
+    text = text.replace('\u2026', '...') # ellipsis
 
     text = text.replace(' — ', '... ')
     text = text.replace('— ', '... ')
@@ -764,6 +788,7 @@ def execute_function_call(func_call, bot_response, user_input, source="voice", h
                 "config": CONFIG,
             }
             result = skills.execute(function_name, parameters, context)
+            queue_message(f"TOOL RESULT: {function_name} -> {str(result)[:200] if result else 'None'}")
             # If skill returns a string, update the reply
             if result is not None:
                 if bot_response.get("_skill_replied"):

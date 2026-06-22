@@ -72,6 +72,7 @@ class UIManagerLite(threading.Thread):
         self._dirty = threading.Event()
 
         self._state = ""
+        self._dnd = False
         self._screensaver_mgr = None
         self._activity = threading.Event()
 
@@ -93,7 +94,17 @@ class UIManagerLite(threading.Thread):
         pass
 
     def set_tars_status(self, status):
-        pass
+        if status in ("STANDBY", "BOOTING"):
+            new = ""
+        elif status == "THINKING":
+            new = "THINKING"
+        elif status == "LISTENING":
+            new = "LISTENING"
+        else:
+            return
+        if self._state != new:
+            self._state = new
+            self._dirty.set()
 
     def think(self):
         if self._state != "THINKING":
@@ -108,6 +119,11 @@ class UIManagerLite(threading.Thread):
             if new:
                 self._activity.set()
             self._dirty.set()
+
+    def set_dnd(self, enabled):
+        """Set Do Not Disturb indicator on the status bar."""
+        self._dnd = enabled
+        self._dirty.set()
 
     def pause(self):
         self.paused = True
@@ -185,6 +201,7 @@ class UIManagerLite(threading.Thread):
 
             label_listening = font.render("LISTENING...", True, CYAN)
             label_thinking = font.render("THINKING...", True, YELLOW)
+            label_dnd = font.render("DND — MIC OFF", True, (255, 68, 68))
 
             composed = pygame.Surface((logical_width, logical_height))
             composed.fill(BLACK)
@@ -287,7 +304,7 @@ class UIManagerLite(threading.Thread):
                         msgs_dirty = True
                         was_screensaver = False
 
-                    if not msgs_dirty and state == prev_state:
+                    if not msgs_dirty and state == prev_state and not self._dnd:
                         continue
 
                     if msgs_dirty:
@@ -303,7 +320,11 @@ class UIManagerLite(threading.Thread):
                     bar_y = logical_height - bar_h
                     pygame.draw.rect(composed, BLACK, (0, bar_y, logical_width, bar_h))
 
-                    if state:
+                    if self._dnd:
+                        lx = (logical_width - label_dnd.get_width()) // 2
+                        ly = bar_y + (bar_h - label_dnd.get_height()) // 2
+                        composed.blit(label_dnd, (lx, ly))
+                    elif state:
                         label = label_thinking if state == "THINKING" else label_listening
                         lx = (logical_width - label.get_width()) // 2
                         ly = bar_y + (bar_h - label.get_height()) // 2

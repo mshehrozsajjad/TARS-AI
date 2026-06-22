@@ -58,10 +58,10 @@ class DeviceCapabilities:
 DEVICE_PROFILES: Dict[DeviceProfile, DeviceCapabilities] = {
     DeviceProfile.PI5: DeviceCapabilities(
         profile=DeviceProfile.PI5,
-        allowed_stt={"fastrtc", "silero", "openai", "external", "sherpa-onnx"},
+        allowed_stt={"fastrtc", "silero", "openai", "external", "sherpa-onnx", "gladia", "deepgram"},
         allowed_tts={"espeak", "piper", "silero", "elevenlabs", "openai", "other", "external"},
         allowed_vad={"silero", "rms", "sherpa-onnx", "smart-turn"},
-        allowed_wake={"fastrtc", "atomik", "sherpa-onnx"},
+        allowed_wake={"fastrtc", "atomik", "sherpa-onnx", "openwakeword"},
         can_use_embeddings=True,
         can_use_ui=True,
         can_use_vision=True,
@@ -76,10 +76,10 @@ DEVICE_PROFILES: Dict[DeviceProfile, DeviceCapabilities] = {
     ),
     DeviceProfile.PI4: DeviceCapabilities(
         profile=DeviceProfile.PI4,
-        allowed_stt={"openai", "external", "sherpa-onnx"},
+        allowed_stt={"openai", "external", "sherpa-onnx", "gladia", "deepgram"},
         allowed_tts={"espeak", "piper", "elevenlabs", "openai", "other", "external"},
         allowed_vad={"silero", "rms", "sherpa-onnx", "smart-turn"},
-        allowed_wake={"atomik", "sherpa-onnx"},
+        allowed_wake={"atomik", "sherpa-onnx", "openwakeword"},
         can_use_embeddings=True,
         can_use_ui=True,
         can_use_vision=False,
@@ -94,10 +94,10 @@ DEVICE_PROFILES: Dict[DeviceProfile, DeviceCapabilities] = {
     ),
     DeviceProfile.PI3: DeviceCapabilities(
         profile=DeviceProfile.PI3,
-        allowed_stt={"openai", "external"},
+        allowed_stt={"openai", "external", "gladia", "deepgram"},
         allowed_tts={"espeak", "elevenlabs", "openai", "other", "external"},
-        allowed_vad={"rms", "sherpa-onnx"},
-        allowed_wake={"atomik", "sherpa-onnx"},
+        allowed_vad={"rms", "sherpa-onnx", "silero"},
+        allowed_wake={"atomik", "sherpa-onnx", "openwakeword"},
         can_use_embeddings=False,
         can_use_ui=True,
         can_use_vision=False,
@@ -112,7 +112,7 @@ DEVICE_PROFILES: Dict[DeviceProfile, DeviceCapabilities] = {
     ),
     DeviceProfile.PIZERO2: DeviceCapabilities(
         profile=DeviceProfile.PIZERO2,
-        allowed_stt={"openai"},
+        allowed_stt={"openai", "gladia", "deepgram"},
         allowed_tts={"elevenlabs", "openai", "other", "external"},
         allowed_vad={"rms"},
         allowed_wake={"atomik"},
@@ -202,8 +202,12 @@ def apply_device_overrides(config_dict: dict, capabilities: DeviceCapabilities) 
             queue_message(f"WARNING: Wake word '{wake_processor}' not supported on {capabilities.profile.value}, using '{capabilities.fallback_wake}'")
         config_dict["STT"]["wake_word_processor"] = capabilities.fallback_wake
     
-    if config_dict["LLM"]["contextsize"] > capabilities.max_context_size:
-        config_dict["LLM"]["contextsize"] = capabilities.max_context_size
+    # Only cap context size for local/on-device LLM backends where Pi RAM matters.
+    # Cloud backends (openai, grok, deepinfra, gemini) process context server-side.
+    _cloud_backends = {"openai", "grok", "deepinfra", "gemini"}
+    if config_dict["LLM"]["llm_backend"] not in _cloud_backends:
+        if config_dict["LLM"]["contextsize"] > capabilities.max_context_size:
+            config_dict["LLM"]["contextsize"] = capabilities.max_context_size
     
     if not capabilities.can_use_ui and config_dict["UI"]["UI_enabled"]:
         if show_warnings:
@@ -211,12 +215,23 @@ def apply_device_overrides(config_dict: dict, capabilities: DeviceCapabilities) 
         config_dict["UI"]["UI_enabled"] = False
     
     if not capabilities.can_use_vision and config_dict["VISION"]["enabled"]:
-        config_dict["VISION"]["enabled"] = False
+        # Allow cloud-based vision processors even on low-RAM devices
+        cloud_processors = ("openai", "llm", "server_hosted")
+        if config_dict["VISION"].get("vision_processor") not in cloud_processors:
+            config_dict["VISION"]["enabled"] = False
+            if show_warnings:
+                queue_message(f"WARNING: Local vision disabled for {capabilities.profile.value} — use openai/llm/server_hosted for cloud vision")
     
     if not capabilities.can_use_emotion and config_dict["EMOTION"]["enabled"]:
-        if show_warnings:
-            queue_message(f"WARNING: Emotion disabled for {capabilities.profile.value}")
-        config_dict["EMOTION"]["enabled"] = False
+        # LLM emotion method has zero resource cost — it reads the emotion field
+        # the LLM already returns, so allow it even on constrained devices.
+        if config_dict["EMOTION"].get("emotion_method") == "llm":
+            if show_warnings:
+                queue_message(f"INFO: Emotion using LLM method on {capabilities.profile.value} (no local model needed)")
+        else:
+            if show_warnings:
+                queue_message(f"WARNING: Emotion classifier disabled for {capabilities.profile.value} — set emotion_method=llm to use LLM-based emotion")
+            config_dict["EMOTION"]["enabled"] = False
     
     config_dict["_device"] = {
         "raspberry_version": capabilities.profile.value,
@@ -379,7 +394,14 @@ def load_config():
         queue_message("ERROR: [PERSONA] section missing in persona.ini.")
         sys.exit(1)
 
-    raspberry_version = detect_raspberry_pi_version()
+    # Allow manual override of device profile via config.ini [DEVICE] section.
+    # Useful when hardware is Pi4 but dependencies were installed for Pi3 profile.
+    forced_profile = config.get('DEVICE', 'profile', fallback='').strip().lower()
+    if forced_profile:
+        raspberry_version = forced_profile
+        queue_message(f"LOAD: Using forced device profile: {forced_profile}")
+    else:
+        raspberry_version = detect_raspberry_pi_version()
 
     device_profile = get_device_profile(raspberry_version)
     capabilities = DEVICE_PROFILES[device_profile]
@@ -404,6 +426,7 @@ def load_config():
             "wake_word": config['STT']['wake_word'],
             "wake_word_processor": config['STT']['wake_word_processor'],
             "atomik_mode": config.get('STT', 'atomik_mode', fallback='auto'),
+            "oww_model_name": config.get('STT', 'oww_model_name', fallback=''),
             "sensitivity": config['STT']['sensitivity'],
             "vad_transcript_verify": config.get('STT', 'vad_transcript_verify', fallback='False'),
             "vad_presence_gate": config.get('STT', 'vad_presence_gate', fallback='off'),
@@ -437,6 +460,7 @@ def load_config():
             "base_url": config['LLM']['base_url'],
             "openai_model": config['LLM']['openai_model'],
             "other_model": config.get('LLM', 'other_model', fallback=''),
+            "gemini_model": config.get('LLM', 'gemini_model', fallback='gemini-2.5-flash'),
             "grok_model": config['LLM']['grok_model'],
             "systemprompt": config['LLM']['systemprompt'],
             "contextsize": int(config['LLM']['contextsize']),
@@ -536,6 +560,8 @@ def load_config():
             "webui_password": config.get('ACCESS', 'webui_password', fallback='tarspass1234'),
             "webui_theme": config.get('ACCESS', 'webui_theme', fallback='default'),
             "remote_access_enabled": config.getboolean('ACCESS', 'remote_access_enabled', fallback=False),
+            "tunnel_name": config.get('ACCESS', 'tunnel_name', fallback=''),
+            "tunnel_hostname": config.get('ACCESS', 'tunnel_hostname', fallback=''),
         },
         "UI": {
             "UI_enabled": config.getboolean('UI', 'UI_enabled'),
@@ -560,7 +586,31 @@ def load_config():
             "battery_capacity_mAh": int(config.get('BATTERY', 'battery_capacity_mAh', fallback='3000')),
             "battery_initial_voltage": float(config.get('BATTERY', 'battery_initial_voltage', fallback='12')),
             "battery_cutoff_voltage": float(config.get('BATTERY', 'battery_cutoff_voltage', fallback='10')),
-        }
+        },
+        "GEMINI_LIVE": {
+            "conversation_mode": config.get('GEMINI_LIVE', 'conversation_mode', fallback='standard'),
+            "model": config.get('GEMINI_LIVE', 'model', fallback='gemini-3.1-flash-live-preview'),
+            "temperature": config.getfloat('GEMINI_LIVE', 'temperature', fallback=float(config.get('LLM', 'temperature', fallback='0.8'))),
+            "vad_silence_ms": config.getint('GEMINI_LIVE', 'vad_silence_ms', fallback=700),
+            "vad_prefix_ms": config.getint('GEMINI_LIVE', 'vad_prefix_ms', fallback=200),
+            "context_trigger_tokens": config.getint('GEMINI_LIVE', 'context_trigger_tokens', fallback=32000),
+        },
+        "DRIVES": {
+            "enabled": config.get('DRIVES', 'enabled', fallback='false'),
+            "tick_interval": config.get('DRIVES', 'tick_interval', fallback='60'),
+            "proactive_speech": config.get('DRIVES', 'proactive_speech', fallback='true'),
+            "quiet_start": config.get('DRIVES', 'quiet_start', fallback='23'),
+            "quiet_end": config.get('DRIVES', 'quiet_end', fallback='7'),
+        },
+        "AWARENESS": {
+            "enabled": config.get('AWARENESS', 'enabled', fallback='false'),
+            "face_interval": config.get('AWARENESS', 'face_interval', fallback='3'),
+            "scene_interval": config.get('AWARENESS', 'scene_interval', fallback='60'),
+            "server_url": config.get('AWARENESS', 'server_url', fallback=''),
+            "face_recognition": config.get('AWARENESS', 'face_recognition', fallback='server'),
+            "proactive_greetings": config.get('AWARENESS', 'proactive_greetings', fallback='true'),
+            "departure_timeout": config.get('AWARENESS', 'departure_timeout', fallback='30'),
+        },
     }
 
     config_dict = apply_device_overrides(config_dict, capabilities)
@@ -573,6 +623,7 @@ def get_api_key(llm_backend: str) -> str:
         "openai": "OPENAI_API_KEY",
         "grok": "GROK_API_KEY",
         "deepinfra": "DEEPINFRA_API_KEY",
+        "gemini": "GEMINI_API_KEY",
         "other": "OTHER_API_KEY"
     }
     if llm_backend not in backend_to_env_var:
@@ -770,8 +821,8 @@ CONFIG_METADATA = {
         'wake_word_processor': {
             'group': 'wake_word',
             'label': 'Wake Word Engine',
-            'options': ['atomik', 'fastrtc', 'sherpa-onnx'],
-            'description': '"atomik" is built into TARS, works offline, and is the recommended choice. "sherpa-onnx" transcribes audio and matches the wake word offline (Pi5/Pi4). "fastrtc" uses an internet-based service for detection.'
+            'options': ['atomik', 'openwakeword', 'fastrtc', 'sherpa-onnx'],
+            'description': '"atomik" is built into TARS, works offline, and is the recommended choice. "openwakeword" uses pre-trained neural network models from the openWakeWord project — lightweight, offline, and supports custom models. "sherpa-onnx" transcribes audio and matches the wake word offline (Pi5/Pi4). "fastrtc" uses an internet-based service for detection.'
         },
         'atomik_mode': {
             'group': 'wake_word',
@@ -779,6 +830,12 @@ CONFIG_METADATA = {
             'depends_on': [{'field': 'wake_word_processor', 'values': ['atomik']}],
             'options': ['auto', 'model', 'template'],
             'description': '"auto" uses the ONNX model if available, otherwise falls back to template matching. "model" requires a trained ONNX model (created with the wakeword-trainer tool). "template" records your wake word 5 times on-device and matches by cosine similarity — easiest to set up.'
+        },
+        'oww_model_name': {
+            'group': 'wake_word',
+            'label': 'openWakeWord Model',
+            'depends_on': [{'field': 'wake_word_processor', 'values': ['openwakeword']}],
+            'description': 'The openWakeWord model to use for detection. Use a pre-trained name like "hey_jarvis_v0.1" or "alexa_v0.1", or a path to a custom .tflite/.onnx model file inside the stt/ folder. Leave blank to load all available pre-trained models. See the openWakeWord GitHub for available model names.'
         },
         'sensitivity': {
             'group': 'wake_word',

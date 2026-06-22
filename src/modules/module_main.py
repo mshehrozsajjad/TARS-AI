@@ -90,6 +90,14 @@ def wake_word_callback(wake_response):
     except Exception:
         pass
 
+    # In Gemini Live mode, skip the wake response entirely — no text, no audio.
+    conversation_mode = CONFIG.get("GEMINI_LIVE", {}).get("conversation_mode", "standard")
+    if conversation_mode == "gemini_live":
+        if ui_manager:
+            ui_manager.deactivate_screensaver()
+        set_tars_state(TarsState.LISTENING)
+        return
+
     # Deactivate screensaver when wake word is detected
     if ui_manager:
         ui_manager.deactivate_screensaver()
@@ -137,9 +145,9 @@ def utterance_callback(message):
         # defer the blocking wait to build_prompt (right before speaker context),
         # giving the background observer maximum time to finish identification.
         _sid_start = time.perf_counter()
-        # Use last known named speaker for immediate UI display while the
-        # current utterance's speaker ID is still processing in the background.
+        # Resolve display name: voice last-known > face recognition > config fallback
         _speaker_display = CONFIG['CHAR'].get('user_name', 'User')
+        _voice_resolved = False
         try:
             from modules.module_speaker_id import get_speaker_id_manager
             _sid_mgr = get_speaker_id_manager()
@@ -147,8 +155,23 @@ def utterance_callback(message):
                 _last = _sid_mgr.get_last_named_speaker()
                 if _last:
                     _speaker_display = _last
+                    _voice_resolved = True
         except Exception:
             pass
+        # Face recognition fallback — only if voice has no known speaker
+        if not _voice_resolved:
+            try:
+                from modules.module_identity import get_identity_manager
+                _im = get_identity_manager()
+                if _im is not None:
+                    _faces = _im.get_recognized_faces()
+                    _known = [f for f in _faces if f.get("name") not in (None, "", "UNKNOWN")]
+                    if len(_known) == 1:
+                        _speaker_display = _known[0]["name"]
+            except Exception:
+                pass
+
+        queue_message(f"[{_speaker_display}] {user_text}")
 
         if ui_manager:
             ui_manager.update_data(_speaker_display, user_text, _speaker_display)
@@ -179,6 +202,7 @@ def utterance_callback(message):
         # ── Sentence-pipeline TTS ─────────────────────────────────────────────
         _acc_raw    = ['']   # cumulative raw text from LLM (may include <think>)
         _clean_seen = ['']   # total clean text processed so far (for delta tracking)
+        _pending_gesture = [None]  # gesture name from LLM response, fired on first TTS play
 
         def _apply_sanitize(text):
             text = _sanitize_for_tts(text)
@@ -189,6 +213,15 @@ def utterance_callback(message):
             set_tars_state(TarsState.TALKING)
             if stt_manager:
                 stt_manager.start_bargein_monitor(tts_text="")
+            # Fire gesture in parallel with speech start
+            if _pending_gesture[0] and _pending_gesture[0] != '_fired':
+                try:
+                    from modules.module_gestures import execute_gesture_async
+                    execute_gesture_async(_pending_gesture[0])
+                except Exception as e:
+                    queue_message(f"WARNING: Gesture failed: {e}")
+            # Mark as fired so the parsed-response handler doesn't fire again
+            _pending_gesture[0] = '_fired'
 
         pipeline = SentenceTTSPipeline(
             CONFIG['TTS']['ttsoption'],
@@ -197,8 +230,9 @@ def utterance_callback(message):
         )
 
         # Add placeholder message to OpenGL UI for streaming updates
+        # Only for full UI which overwrites it via update_streaming_data
         character_name = CONFIG['CHAR']['character_name']
-        if ui_manager:
+        if ui_manager and hasattr(ui_manager, 'update_streaming_data'):
             ui_manager.update_data(character_name, "", character_name)
 
         def on_reply_chunk(chunk, is_first):
@@ -220,7 +254,9 @@ def utterance_callback(message):
                 return
 
             # Stream to OpenGL UI (update last message in-place)
-            if ui_manager:
+            # UIManagerLite only has update_data which adds new messages,
+            # so skip streaming updates for it — final reply is shown once below.
+            if ui_manager and hasattr(ui_manager, 'update_streaming_data'):
                 ui_manager.update_streaming_data(clean_total)
 
             # Stream new text to web UI (only if user is on webui)
@@ -313,6 +349,30 @@ def utterance_callback(message):
         except Exception:
             pass
 
+        # Log reply and function calls to terminal
+        character_name = CONFIG['CHAR']['character_name']
+        queue_message(f"[{character_name}] {reply}")
+        if isinstance(parsed, dict):
+            fc = parsed.get("function_calls", [])
+            if fc:
+                queue_message(f"TOOLS: {fc}")
+
+        # Extract gesture from LLM response — set pending so _on_first_play fires it.
+        # If TTS already started (on_first_play already ran), fire immediately.
+        if isinstance(parsed, dict):
+            gesture_name = parsed.get("gesture")
+            if gesture_name:
+                if _pending_gesture[0] == '_fired':
+                    # _on_first_play already ran — fire gesture now
+                    try:
+                        from modules.module_gestures import execute_gesture_async
+                        execute_gesture_async(gesture_name)
+                    except Exception as e:
+                        queue_message(f"WARNING: Gesture failed: {e}")
+                else:
+                    # TTS hasn't started yet — queue for _on_first_play
+                    _pending_gesture[0] = gesture_name
+
         # Detect emotion (parallel-safe — runs while TTS thread plays sentences)
         speed.start('emotion')
         emotion = None
@@ -353,10 +413,15 @@ def utterance_callback(message):
 
         # Finalize the streaming message with the complete reply
         if ui_manager:
-            ui_manager.update_streaming_data(reply)
+            if hasattr(ui_manager, 'update_streaming_data'):
+                ui_manager.update_streaming_data(reply)
+            else:
+                character_name = CONFIG['CHAR']['character_name']
+                ui_manager.update_data(character_name, reply, character_name)
 
         # Handle side effects (vision/search/photo run inline, others in background)
         _followup_reply = None
+        _side_effects_thread = None
         tools_dur = 0
         if not isinstance(parsed, str):
             func_calls = parsed.get("function_calls", [])
@@ -383,14 +448,15 @@ def utterance_callback(message):
                     queue_message(f"DEBUG VOICE: Follow-up reply detected: {_followup_reply[:80]}...")
                 else:
                     queue_message(f"DEBUG VOICE: No reply change after side effects")
-            elif func_calls or new_mems:
+            else:
+                # Always run side effects — write_longterm_memory saves
+                # the conversation even when there are no function calls
                 queue_message(f"DEBUG VOICE: Running side effects in background thread")
-                threading.Thread(
+                _side_effects_thread = threading.Thread(
                     target=llm_execute_side_effects,
                     args=(parsed, user_text), daemon=True
-                ).start()
-            else:
-                queue_message(f"DEBUG VOICE: No side effects to run")
+                )
+                _side_effects_thread.start()
         else:
             queue_message(f"DEBUG VOICE: parsed is str (legacy), no side effects")
 
@@ -400,6 +466,13 @@ def utterance_callback(message):
             set_tars_state(TarsState.TALKING)
             if stt_manager:
                 stt_manager.start_bargein_monitor(tts_text=reply_clean)
+            # Fire gesture at speech start for preemptive path
+            if isinstance(parsed, dict) and parsed.get("gesture"):
+                try:
+                    from modules.module_gestures import execute_gesture_async
+                    execute_gesture_async(parsed["gesture"])
+                except Exception:
+                    pass
             speed.start('tts')
             was_interrupted = asyncio.run(play_audio_chunks(reply_clean, CONFIG['TTS']['ttsoption'], emotion=emotion))
             pipeline._duration = speed.stop('tts')
@@ -420,7 +493,11 @@ def utterance_callback(message):
             # Update OpenGL UI with follow-up content
             set_tars_state(TarsState.TALKING)
             if ui_manager:
-                ui_manager.update_streaming_data(_followup_reply)
+                if hasattr(ui_manager, 'update_streaming_data'):
+                    ui_manager.update_streaming_data(_followup_reply)
+                else:
+                    character_name = CONFIG['CHAR']['character_name']
+                    ui_manager.update_data(character_name, _followup_reply, character_name)
             if stt_manager:
                 stt_manager.start_bargein_monitor(tts_text=followup_clean)
             speed.start('followup_tts')
@@ -429,6 +506,11 @@ def utterance_callback(message):
             if stt_manager:
                 stt_manager.stop_bargein_monitor()
             reply = _followup_reply  # Update for web UI display
+
+        # Wait for background tool execution to finish before starting next recording
+        if _side_effects_thread is not None:
+            queue_message("DEBUG VOICE: Waiting for background tool execution to finish...")
+            _side_effects_thread.join(timeout=30)
 
         # After response finishes, return to LISTENING (waiting for next utterance in session)
         # Bot only goes to STANDBY after timeout in STT manager
@@ -475,6 +557,22 @@ def utterance_callback(message):
             f"end={'barge-in' if was_interrupted else 'timeout'}",
         ]
         queue_message(f"ROUND: {' | '.join(parts)}")
+
+        # Notify body state (routes to drives + applies emotion↔drive coupling)
+        try:
+            from modules.module_body_state import get_body_state_manager
+            bsm = get_body_state_manager()
+            if bsm is not None:
+                bsm.notify_interaction(user_text, reply,
+                                       emotion=emotion, axis_scores=axis_scores)
+            else:
+                # Fallback: direct drives call
+                from modules.module_drives import get_drives_manager
+                dm = get_drives_manager()
+                if dm is not None:
+                    dm.on_interaction(user_text, reply)
+        except Exception:
+            pass
 
         # Speed profiling summary
         total_dur = speed.stop('total')
@@ -528,6 +626,129 @@ def utterance_callback(message):
     except Exception as e:
         set_tars_state(TarsState.LISTENING)
         queue_message(f"ERROR: {e}")
+
+def gemini_live_callback():
+    """
+    Handle a conversation turn using Gemini Live API (AUDIO mode).
+    Called after wake word when conversation_mode = 'gemini_live'.
+    Streams mic audio to Gemini, plays Gemini's audio response directly.
+    No separate TTS needed — Gemini handles everything.
+    """
+    try:
+        import modules.module_speed as speed
+        speed.mark_utterance_start()
+        speed.start('total')
+
+        from modules.module_gemini_live import run_gemini_live_turn
+
+        # Deactivate screensaver
+        if ui_manager:
+            ui_manager.deactivate_screensaver()
+
+        set_tars_state(TarsState.LISTENING)
+        character_name = CONFIG['CHAR']['character_name']
+        user_name = CONFIG['CHAR'].get('user_name', 'User')
+
+        # Check if user is on WebUI
+        try:
+            from modules.module_router import get_active_route
+            _is_webui = get_active_route().get("source") == "webui"
+        except Exception:
+            _is_webui = False
+
+        _has_started_talking = [False]
+
+        def on_input_transcript(text):
+            """Called when Gemini transcribes user speech."""
+            queue_message(f"GEMINI_LIVE: [{user_name}] {text}")
+            if ui_manager:
+                ui_manager.update_data(user_name, text, user_name)
+            if _is_webui:
+                try:
+                    from modules.module_chatui import push_user_message
+                    push_user_message(text, speaker_name=user_name)
+                except Exception:
+                    pass
+
+        def on_output_transcript(text):
+            """Called when Gemini transcribes its own response."""
+            if not _has_started_talking[0]:
+                _has_started_talking[0] = True
+                set_tars_state(TarsState.TALKING)
+                speed.mark_first_token()
+            if ui_manager:
+                if hasattr(ui_manager, 'update_streaming_data'):
+                    ui_manager.update_streaming_data(text)
+                else:
+                    ui_manager.update_data(character_name, text, character_name)
+            if _is_webui:
+                try:
+                    from modules.module_chatui import stream_reply_token
+                    stream_reply_token(text)
+                except Exception:
+                    pass
+
+        # ── Run the Gemini Live turn (audio played inside the module) ──
+        set_tars_state(TarsState.THINKING)
+        result = run_gemini_live_turn(
+            on_input_transcript=on_input_transcript,
+            on_output_transcript=on_output_transcript,
+        )
+
+        if result is None:
+            set_tars_state(TarsState.LISTENING)
+            return
+
+        input_text = result.get('input_transcript', '')
+        output_text = result.get('output_transcript', '')
+
+        # Finalize UI
+        if ui_manager and output_text:
+            if hasattr(ui_manager, 'update_streaming_data'):
+                ui_manager.update_streaming_data(output_text)
+            else:
+                ui_manager.update_data(character_name, output_text, character_name)
+
+        set_tars_state(TarsState.LISTENING)
+
+        # Push final reply to web UI
+        try:
+            if _is_webui:
+                from modules.module_chatui import socketio
+                socketio.emit('bot_message', {'message': output_text, 'audio_streamed': True})
+                socketio.emit('bot_audio_done', {})
+                socketio.emit('talking_state', {'talking': False})
+        except Exception:
+            pass
+
+        # Log summary
+        parts = [
+            f"mode=gemini_live_audio",
+            f"user={input_text[:60]!r}" if input_text else "user=?",
+        ]
+        queue_message(f"ROUND: {' | '.join(parts)}")
+
+        # Speed profiling
+        total_dur = speed.stop('total')
+        if speed.enabled:
+            queue_message(f"SPEED: total({speed.fmt(total_dur)})")
+
+        # Save conversation to memory (background)
+        if memory_manager and input_text and output_text:
+            import threading as _threading
+            def _save_mem():
+                try:
+                    memory_manager.write_longterm_memory(input_text, output_text, None)
+                except Exception:
+                    pass
+            _threading.Thread(target=_save_mem, daemon=True).start()
+
+    except Exception as e:
+        set_tars_state(TarsState.LISTENING)
+        queue_message(f"ERROR: Gemini Live turn failed: {e}")
+        import traceback
+        traceback.print_exc()
+
 
 def post_utterance_callback():
     """
