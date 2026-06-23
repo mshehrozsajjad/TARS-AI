@@ -223,14 +223,15 @@ def apply_device_overrides(config_dict: dict, capabilities: DeviceCapabilities) 
                 queue_message(f"WARNING: Local vision disabled for {capabilities.profile.value} — use openai/llm/server_hosted for cloud vision")
     
     if not capabilities.can_use_emotion and config_dict["EMOTION"]["enabled"]:
-        # LLM emotion method has zero resource cost — it reads the emotion field
-        # the LLM already returns, so allow it even on constrained devices.
-        if config_dict["EMOTION"].get("emotion_method") == "llm":
+        # LLM and server methods have zero local resource cost — allow on all devices.
+        # Only the local classifier needs Pi5 resources.
+        emo_method = config_dict["EMOTION"].get("emotion_method", "llm")
+        if emo_method in ("llm", "server"):
             if show_warnings:
-                queue_message(f"INFO: Emotion using LLM method on {capabilities.profile.value} (no local model needed)")
+                queue_message(f"INFO: Emotion using {emo_method} method on {capabilities.profile.value} (no local model needed)")
         else:
             if show_warnings:
-                queue_message(f"WARNING: Emotion classifier disabled for {capabilities.profile.value} — set emotion_method=llm to use LLM-based emotion")
+                queue_message(f"WARNING: Emotion classifier disabled for {capabilities.profile.value} — set emotion_method=llm or server")
             config_dict["EMOTION"]["enabled"] = False
     
     config_dict["_device"] = {
