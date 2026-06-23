@@ -172,7 +172,7 @@ class DrivesManager:
         # Config
         drives_cfg = config.get("DRIVES", {})
         self._enabled = str(drives_cfg.get("enabled", "true")).lower() == "true"
-        self._tick_interval = int(drives_cfg.get("tick_interval", 10))  # TESTING — will revert. Normal: 60
+        self._tick_interval = int(drives_cfg.get("tick_interval", 60))
         self._proactive_enabled = str(drives_cfg.get("proactive_speech", "true")).lower() == "true"
         self._quiet_start = int(drives_cfg.get("quiet_start", 23))
         self._quiet_end = int(drives_cfg.get("quiet_end", 7))
@@ -222,8 +222,8 @@ class DrivesManager:
             idle_seconds = now - self._last_interaction
             idle_minutes = idle_seconds / 60.0
 
-            # Curiosity: builds when idle > 5 min (TESTING: 0.5 min)
-            if idle_minutes > 0.5:  # TESTING — will revert. Normal: 5
+            # Curiosity: builds when idle > 5 min
+            if idle_minutes > 5:
                 self._drives["curiosity"] = min(100, self._drives["curiosity"] + self.CURIOSITY_RATE)
 
             # Social: builds when idle > 10 min
