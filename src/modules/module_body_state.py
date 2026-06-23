@@ -88,6 +88,7 @@ class BodyState:
     # Derived
     time_of_day: str = "day"
     uptime_hours: float = 0.0
+    off_duration: float = 0.0  # seconds TARS was powered off before this boot
 
 
 # ── Manager ──────────────────────────────────────────────────────────────────
@@ -138,11 +139,13 @@ class BodyStateManager:
         # Drives
         drives = {}
         idle_minutes = 0.0
+        off_duration = 0.0
         try:
             from modules.module_drives import get_drives_manager
             dm = get_drives_manager()
             if dm is not None:
                 drives = dm.get_drives()
+                off_duration = dm.get_off_duration()
                 with dm._lock:
                     idle_minutes = (time.time() - dm._last_interaction) / 60.0
         except Exception:
@@ -188,6 +191,7 @@ class BodyStateManager:
             sensors=sensors,
             time_of_day=tod,
             uptime_hours=(time.time() - self._boot_time) / 3600.0,
+            off_duration=off_duration,
         )
 
         with self._lock:
@@ -211,6 +215,14 @@ class BodyStateManager:
 
         # Time of day
         parts.append(s.time_of_day)
+
+        # Just woke up after being off (only include early in the session)
+        if s.off_duration > 3600 and s.uptime_hours < 0.5:
+            off_hours = s.off_duration / 3600
+            if off_hours >= 24:
+                parts.append(f"just powered on after {off_hours / 24:.0f} days off")
+            else:
+                parts.append(f"just powered on after {off_hours:.0f}h off")
 
         # People present
         if s.people_present:

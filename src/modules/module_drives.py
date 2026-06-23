@@ -379,6 +379,11 @@ class DrivesManager:
         with self._lock:
             return dict(self._drives)
 
+    def get_off_duration(self):
+        """Return how long TARS was powered off before this boot (seconds).
+        Returns 0 if it was a quick restart (< 1 hour)."""
+        return getattr(self, '_off_duration', 0)
+
     def get_drives_context(self):
         """Build a formatted context string for LLM prompt injection.
 
@@ -498,17 +503,22 @@ class DrivesManager:
                     if key in saved_drives:
                         self._drives[key] = max(0, min(100, float(saved_drives[key])))
 
-                # Cap stale idle time — if TARS was off for hours/days,
-                # don't let drives think it's been idle that entire time.
+                # Track how long TARS was powered off — this is meaningful context
+                # (different from being idle while running).
                 saved_interaction = data.get("last_interaction", time.time())
-                age = time.time() - saved_interaction
-                if age > self._MAX_IDLE_RESTORE:
-                    self._last_interaction = time.time() - self._MAX_IDLE_RESTORE
-                    # Also reset drives toward resting values since we've been off
+                off_seconds = time.time() - saved_interaction
+                self._off_duration = off_seconds  # available via get_off_duration()
+
+                if off_seconds > self._MAX_IDLE_RESTORE:
+                    self._last_interaction = time.time()
+                    # Reset drives toward resting — we've been asleep, not idle
                     for drive, resting in self._RESTING.items():
                         self._drives[drive] = resting
+                    off_str = f"{off_seconds / 3600:.1f} hours" if off_seconds > 3600 else f"{off_seconds / 60:.0f} minutes"
+                    queue_message(f"DRIVES: Was powered off for {off_str} — drives reset to resting")
                 else:
                     self._last_interaction = saved_interaction
+                    self._off_duration = 0
 
                 self._interaction_count = data.get("interaction_count", 0)
                 lp = data.get("last_proactive", {})
