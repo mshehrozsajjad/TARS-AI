@@ -426,12 +426,14 @@ def get_completion_simple(prompt, max_tokens=60):
         # Remove prompt-built fields that don't apply
         data.pop("response_format", None)
 
+        queue_message(f"DEBUG: get_completion_simple calling {url}")
         resp = _http_session.post(url, headers=headers, json=data, timeout=10)
         resp.raise_for_status()
         result = resp.json()
+        queue_message(f"DEBUG: get_completion_simple response: {str(result)[:300]}")
         return result["choices"][0]["message"]["content"].strip()
     except Exception as e:
-        queue_message(f"DEBUG: get_completion_simple failed: {e}")
+        queue_message(f"DEBUG: get_completion_simple failed: {type(e).__name__}: {e}")
         return None
 
 
