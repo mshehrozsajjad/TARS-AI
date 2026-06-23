@@ -209,6 +209,11 @@ class DrivesManager:
 
     # ── Tick logic ──────────────────────────────────────────────────────────
 
+    # Resting baselines — drives decay toward these when at extremes.
+    # Prevents everything pegging at 100 indefinitely.
+    _RESTING = {"curiosity": 50.0, "social": 50.0, "energy": 80.0, "boredom": 30.0}
+    _DECAY_RATE = 0.5  # points per tick toward resting baseline (slow, ~1hr to settle)
+
     def _tick(self):
         """Called every tick_interval by the heartbeat scheduler."""
         now = time.time()
@@ -242,6 +247,17 @@ class DrivesManager:
             # Boredom: builds when idle > 15 min
             if idle_minutes > 15:
                 self._drives["boredom"] = min(100, self._drives["boredom"] + self.BOREDOM_RATE)
+
+            # Natural decay toward resting baseline — prevents drives from
+            # pegging at 100 indefinitely. Slow (~1 hour to settle from max).
+            for drive, resting in self._RESTING.items():
+                if drive == "energy":
+                    continue  # energy is handled by battery/uptime above
+                val = self._drives[drive]
+                if val > resting + 5:
+                    self._drives[drive] = val - self._DECAY_RATE
+                elif val < resting - 5:
+                    self._drives[drive] = val + self._DECAY_RATE
 
         # Check proactive speech (outside lock — may call TTS)
         if self._proactive_enabled:
@@ -466,6 +482,9 @@ class DrivesManager:
         except Exception:
             pass
 
+    # Max idle age to restore — anything older resets to "just started"
+    _MAX_IDLE_RESTORE = 3600  # 1 hour
+
     def _load(self):
         """Restore drive state from disk."""
         if not os.path.exists(_DRIVES_FILE):
@@ -477,8 +496,20 @@ class DrivesManager:
                 saved_drives = data.get("drives", {})
                 for key in self.DEFAULTS:
                     if key in saved_drives:
-                        self._drives[key] = float(saved_drives[key])
-                self._last_interaction = data.get("last_interaction", time.time())
+                        self._drives[key] = max(0, min(100, float(saved_drives[key])))
+
+                # Cap stale idle time — if TARS was off for hours/days,
+                # don't let drives think it's been idle that entire time.
+                saved_interaction = data.get("last_interaction", time.time())
+                age = time.time() - saved_interaction
+                if age > self._MAX_IDLE_RESTORE:
+                    self._last_interaction = time.time() - self._MAX_IDLE_RESTORE
+                    # Also reset drives toward resting values since we've been off
+                    for drive, resting in self._RESTING.items():
+                        self._drives[drive] = resting
+                else:
+                    self._last_interaction = saved_interaction
+
                 self._interaction_count = data.get("interaction_count", 0)
                 lp = data.get("last_proactive", {})
                 for key in self._last_proactive:
