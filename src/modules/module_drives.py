@@ -110,14 +110,20 @@ def _generate_proactive_line(drive_name, config):
             f"Reply with ONLY the sentence, nothing else."
         )
 
+        queue_message(f"DRIVES: Generating LLM line for {drive_name}...")
         line = get_completion_simple(prompt)
+        queue_message(f"DRIVES: LLM returned: {line!r}")
         if line and line.strip():
             # Clean up — remove quotes, asterisks, extra whitespace
             line = line.strip().strip('"\'').strip('*').strip()
             if line and len(line) < 200:
                 return line
-    except Exception:
-        pass
+            else:
+                queue_message(f"DRIVES: LLM line too long ({len(line)} chars), using fallback")
+        else:
+            queue_message("DRIVES: LLM returned empty, using fallback")
+    except Exception as e:
+        queue_message(f"DRIVES: LLM generation failed: {e}, using fallback")
 
     # Fallback to hardcoded templates
     fallback = _FALLBACK_LINES.get(drive_name, _FALLBACK_LINES["boredom"])
