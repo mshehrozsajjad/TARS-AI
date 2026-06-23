@@ -402,6 +402,39 @@ def process_completion(prompt, image_b64=None):
 
     return _get_parsed(prompt)
 
+
+def get_completion_simple(prompt, max_tokens=60):
+    """Lightweight one-shot LLM call for internal use (proactive speech, etc.).
+
+    No conversation history, no memory, no prompt building — just a raw
+    system+user prompt and a short response. Returns the text or None.
+    """
+    try:
+        llm_backend = CONFIG['LLM']['llm_backend']
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {CONFIG['LLM']['api_key']}"
+        }
+        messages = [
+            {"role": "system", "content": "Respond with only what is asked. No preamble, no explanation."},
+            {"role": "user", "content": prompt},
+        ]
+        url, data = _prepare_request_data(llm_backend, "")
+        data["messages"] = messages
+        data["max_tokens"] = max_tokens
+        data["stream"] = False
+        # Remove prompt-built fields that don't apply
+        data.pop("response_format", None)
+
+        resp = _http_session.post(url, headers=headers, json=data, timeout=10)
+        resp.raise_for_status()
+        result = resp.json()
+        return result["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        queue_message(f"DEBUG: get_completion_simple failed: {e}")
+        return None
+
+
 _emotion_cache = {}
 _EMOTION_CACHE_MAX = 128
 

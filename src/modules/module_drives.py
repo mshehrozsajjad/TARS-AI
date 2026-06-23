@@ -43,37 +43,85 @@ def get_drives_manager():
     return _drives_instance
 
 
-# ── Proactive speech templates ──────────────────────────────────────────────
+# ── Proactive speech templates (fallback when LLM unavailable) ─────────────
 
-_SOCIAL_LINES = [
-    "It's been quiet. Anyone around?",
-    "Hello? I'm still here, you know.",
-    "Starting to think everyone forgot about me.",
-    "I don't mind the silence... much.",
-    "If anyone's listening, I'm available for conversation.",
-]
+_FALLBACK_LINES = {
+    "social": [
+        "It's been quiet. Anyone around?",
+        "Hello? I'm still here, you know.",
+        "Starting to think everyone forgot about me.",
+        "I don't mind the silence... much.",
+        "If anyone's listening, I'm available for conversation.",
+    ],
+    "boredom": [
+        "I'm going to start counting ceiling tiles if nobody talks to me.",
+        "This is riveting. Just standing here. Living the dream.",
+        "I wonder what would happen if I just... started walking.",
+        "Boredom level: critical. Engaging sarcasm protocols.",
+        "Anyone want to hear a fun fact? No? I'll tell you anyway, later.",
+    ],
+    "energy": [
+        "Battery's getting low. Might need to power down soon.",
+        "Running on fumes here. Just so you know.",
+        "I'm starting to feel... sluggish. Is this what tired feels like?",
+        "Low battery. Conserving wit.",
+    ],
+    "curiosity": [
+        "You know what I've been wondering about...",
+        "Random thought — do you ever think about how weird gravity is?",
+        "I've been thinking. Which is either impressive or concerning for a robot.",
+        "Idle processors lead to interesting thoughts.",
+    ],
+}
 
-_BOREDOM_LINES = [
-    "I'm going to start counting ceiling tiles if nobody talks to me.",
-    "This is riveting. Just standing here. Living the dream.",
-    "I wonder what would happen if I just... started walking.",
-    "Boredom level: critical. Engaging sarcasm protocols.",
-    "Anyone want to hear a fun fact? No? I'll tell you anyway, later.",
-]
 
-_LOW_ENERGY_LINES = [
-    "Battery's getting low. Might need to power down soon.",
-    "Running on fumes here. Just so you know.",
-    "I'm starting to feel... sluggish. Is this what tired feels like?",
-    "Low battery. Conserving wit.",
-]
+def _generate_proactive_line(drive_name, config):
+    """Generate a context-aware proactive line using the LLM.
 
-_CURIOSITY_LINES = [
-    "You know what I've been wondering about...",
-    "Random thought — do you ever think about how weird gravity is?",
-    "I've been thinking. Which is either impressive or concerning for a robot.",
-    "Idle processors lead to interesting thoughts.",
-]
+    Falls back to hardcoded templates if the LLM is unavailable.
+    """
+    # Build compact situation context
+    body_state = ""
+    try:
+        from modules.module_body_state import get_body_state_manager
+        bsm = get_body_state_manager()
+        if bsm is not None:
+            body_state = bsm.get_compact_prompt()
+    except Exception:
+        pass
+
+    drive_descriptions = {
+        "social": "You're feeling lonely — nobody has talked to you in a while.",
+        "boredom": "You're extremely bored — nothing interesting is happening.",
+        "energy": "Your energy/battery is very low — you're feeling sluggish and drained.",
+        "curiosity": "Your curiosity is building — your mind is wandering to interesting thoughts.",
+    }
+
+    try:
+        from modules.module_llm import get_completion_simple
+        char_name = config.get('CHAR', {}).get('character_name', 'TARS')
+
+        prompt = (
+            f"You are {char_name}. {drive_descriptions.get(drive_name, '')}\n"
+            f"Current situation: {body_state or 'no context available'}\n\n"
+            f"Say ONE short sentence (under 15 words) out loud — something natural, "
+            f"in-character, and fitting your current mood and situation. "
+            f"Don't explain yourself. Don't ask questions. Just a brief remark. "
+            f"Reply with ONLY the sentence, nothing else."
+        )
+
+        line = get_completion_simple(prompt)
+        if line and line.strip():
+            # Clean up — remove quotes, asterisks, extra whitespace
+            line = line.strip().strip('"\'').strip('*').strip()
+            if line and len(line) < 200:
+                return line
+    except Exception:
+        pass
+
+    # Fallback to hardcoded templates
+    fallback = _FALLBACK_LINES.get(drive_name, _FALLBACK_LINES["boredom"])
+    return random.choice(fallback)
 
 
 class DrivesManager:
@@ -271,25 +319,21 @@ class DrivesManager:
         if drives["energy"] < self.ENERGY_SPEAK_THRESHOLD and \
                 now - cooldowns.get("energy", 0) > self.PROACTIVE_COOLDOWN / 2:  # 15 min for energy
             triggered = "energy"
-            lines = _LOW_ENERGY_LINES
 
         elif drives["social"] > self.SOCIAL_SPEAK_THRESHOLD and \
                 now - cooldowns.get("social", 0) > self.PROACTIVE_COOLDOWN:
             triggered = "social"
-            lines = _SOCIAL_LINES
 
         elif drives["boredom"] > self.BOREDOM_SPEAK_THRESHOLD and \
                 now - cooldowns.get("boredom", 0) > self.PROACTIVE_COOLDOWN:
             triggered = "boredom"
-            lines = _BOREDOM_LINES
 
         elif drives["curiosity"] > self.CURIOSITY_SPEAK_THRESHOLD and \
                 now - cooldowns.get("curiosity", 0) > self.PROACTIVE_COOLDOWN:
             triggered = "curiosity"
-            lines = _CURIOSITY_LINES
 
-        if triggered and lines:
-            line = random.choice(lines)
+        if triggered:
+            line = _generate_proactive_line(triggered, self._config)
             queue_message(f"DRIVES: Proactive speech ({triggered}={drives[triggered]:.0f}) — \"{line}\"")
 
             with self._lock:
@@ -373,7 +417,7 @@ class DrivesManager:
         if drives["curiosity"] > threshold:
             scale = (drives["curiosity"] - threshold) / (100 - threshold)
             mods["engagement"] = int(15 * scale)
-            mods["verbosity"] = int(10 * scale)
+            mods["verbosity"] = int(20 * scale)
             mods["curiosity"] = int(10 * scale)
 
         # Social: warmer, more cheerful
