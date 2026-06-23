@@ -138,7 +138,7 @@ class DrivesManager:
 
     # Per-tick increments (1 tick = tick_interval seconds, default 60s)
     # Tuned so proactive speech triggers after ~30-45 min of silence
-    CURIOSITY_RATE = 30.0      # TESTING — will revert. Normal: 1.5
+    CURIOSITY_RATE = 1.5       # per tick when idle > 5 min  → ~47 min to threshold
     SOCIAL_RATE = 2.0          # per tick when idle > 10 min → ~30 min to threshold
     BOREDOM_RATE = 1.5         # per tick when idle > 15 min → ~50 min to threshold
 
@@ -146,10 +146,10 @@ class DrivesManager:
     SOCIAL_SPEAK_THRESHOLD = 80
     BOREDOM_SPEAK_THRESHOLD = 85
     ENERGY_SPEAK_THRESHOLD = 15
-    CURIOSITY_SPEAK_THRESHOLD = 60   # TESTING — will revert. Normal: 90
+    CURIOSITY_SPEAK_THRESHOLD = 90
 
     # Cooldown between proactive speech of same type (seconds)
-    PROACTIVE_COOLDOWN = 120   # TESTING — will revert. Normal: 1800 (30 min)
+    PROACTIVE_COOLDOWN = 1800  # 30 minutes
 
     def __init__(self, config, battery_module=None, ui_manager=None):
         global _drives_instance
