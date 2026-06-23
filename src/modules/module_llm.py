@@ -407,7 +407,7 @@ def get_completion_simple(prompt, max_tokens=60):
     """Lightweight one-shot LLM call for internal use (proactive speech, etc.).
 
     No conversation history, no memory, no prompt building — just a raw
-    system+user prompt and a short response. Returns the text or None.
+    system+user prompt and a short plain-text response. Returns text or None.
     """
     try:
         llm_backend = CONFIG['LLM']['llm_backend']
@@ -415,22 +415,38 @@ def get_completion_simple(prompt, max_tokens=60):
             "Content-Type": "application/json",
             "Authorization": f"Bearer {CONFIG['LLM']['api_key']}"
         }
-        messages = [
-            {"role": "system", "content": "Respond with only what is asked. No preamble, no explanation."},
-            {"role": "user", "content": prompt},
-        ]
-        url, data = _prepare_request_data(llm_backend, "")
-        data["messages"] = messages
-        data["max_tokens"] = max_tokens
-        data["stream"] = False
-        # Remove prompt-built fields that don't apply
-        data.pop("response_format", None)
 
-        queue_message(f"DEBUG: get_completion_simple calling {url}")
+        # Build URL + model from backend config (same logic as _prepare_request_data)
+        if llm_backend == "openai":
+            url = "https://api.openai.com/v1/chat/completions"
+            model = CONFIG['LLM']['openai_model']
+        elif llm_backend == "grok":
+            url = "https://api.x.ai/v1/chat/completions"
+            model = CONFIG['LLM']['grok_model']
+        elif llm_backend == "deepinfra":
+            url = "https://api.deepinfra.com/v1/openai/chat/completions"
+            model = CONFIG['LLM']['openai_model']
+        elif llm_backend == "gemini":
+            url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+            model = CONFIG['LLM']['gemini_model']
+        else:
+            url = f"{CONFIG['LLM']['base_url']}/v1/chat/completions"
+            model = CONFIG['LLM']['other_model']
+
+        data = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "Respond with only what is asked. No preamble, no explanation."},
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": max_tokens,
+            "temperature": 0.9,
+            "stream": False,
+        }
+
         resp = _http_session.post(url, headers=headers, json=data, timeout=10)
         resp.raise_for_status()
         result = resp.json()
-        queue_message(f"DEBUG: get_completion_simple response: {str(result)[:300]}")
         return result["choices"][0]["message"]["content"].strip()
     except Exception as e:
         queue_message(f"DEBUG: get_completion_simple failed: {type(e).__name__}: {e}")
