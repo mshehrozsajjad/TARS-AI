@@ -433,16 +433,23 @@ def get_completion_simple(prompt, max_tokens=60):
             url = f"{CONFIG['LLM']['base_url']}/v1/chat/completions"
             model = CONFIG['LLM']['other_model']
 
+        # Reasoning models (gpt-5*, o1, o3, o4) reject temperature and max_tokens
+        _is_reasoning = model.startswith(("gpt-5", "o1", "o3", "o4"))
+
         data = {
             "model": model,
             "messages": [
                 {"role": "system", "content": "Respond with only what is asked. No preamble, no explanation."},
                 {"role": "user", "content": prompt},
             ],
-            "max_tokens": max_tokens,
-            "temperature": 0.9,
             "stream": False,
         }
+
+        if _is_reasoning:
+            data["max_completion_tokens"] = max_tokens
+        else:
+            data["max_tokens"] = max_tokens
+            data["temperature"] = 0.9
 
         resp = _http_session.post(url, headers=headers, json=data, timeout=10)
         resp.raise_for_status()
