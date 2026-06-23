@@ -384,6 +384,9 @@ def utterance_callback(message):
                 if isinstance(parsed, dict):
                     emotion, emotion_raw, axis_scores = detect_emotion_from_llm(parsed.get('emotion'))
                 # else: LLM response wasn't valid JSON — skip emotion silently
+            elif _emo_method == 'server':
+                from modules.module_llm import detect_emotion_server
+                emotion, emotion_raw, axis_scores = detect_emotion_server(user_text)
             else:
                 emotion, emotion_raw, axis_scores = detect_emotion(user_text)
             if emotion:

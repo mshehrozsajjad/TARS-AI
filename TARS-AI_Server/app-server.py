@@ -391,8 +391,9 @@ _CONFIG_DEFAULTS = {
     "server":     {"port": "5678", "api_key": ""},
     "services":   {"stt": "true", "tts": "true", "llm": "true", "vision": "true",
                    "imagegen": "false", "musicgen": "false", "embeddings": "false",
-                   "facerecognition": "true"},
+                   "facerecognition": "true", "emotion": "true"},
     "facerecognition": {"model": "buffalo_sc"},
+    "emotion": {"model": "SamLowe/roberta-base-go_emotions-onnx"},
     "stt":        {"whisper_model": "large-v3", "compute_type": "auto", "vad_filter": "true", "device": "auto"},
     "llm":        {"model": "Qwen/Qwen3-4B",
                    "dtype": "auto", "quantize": "none", "backend": "auto",
@@ -486,6 +487,7 @@ _ENDPOINT_SERVICE = {
     "/generate_music": "musicgen", "/musicgen_gallery": "musicgen",
     "/v1/embeddings": "embeddings",
     "/face/": "facerecognition",
+    "/emotion/": "emotion",
 }
 
 
@@ -1506,6 +1508,90 @@ class EmbeddingsService:
     def unload(self):
         del self.model
         self.model = None
+
+
+# ===================================================================
+# Emotion Classification Service (GoEmotions)
+# ===================================================================
+
+# 28 GoEmotions → 8 radar axes
+_EMOTION_TO_AXIS = {
+    "joy": "joy", "amusement": "joy", "excitement": "joy", "optimism": "joy", "pride": "joy", "relief": "joy",
+    "anger": "anger", "annoyance": "anger", "disapproval": "anger", "disgust": "anger",
+    "sadness": "sadness", "disappointment": "sadness", "grief": "sadness", "remorse": "sadness", "embarrassment": "sadness",
+    "fear": "fear", "nervousness": "fear",
+    "love": "love", "admiration": "love", "caring": "love", "desire": "love", "gratitude": "love", "approval": "love",
+    "curiosity": "curiosity", "confusion": "curiosity", "realization": "curiosity",
+    "surprise": "surprise",
+    "neutral": "neutral",
+}
+_RADAR_AXES = ["joy", "anger", "sadness", "fear", "love", "curiosity", "surprise", "neutral"]
+
+
+class EmotionService:
+    """Text emotion classification using GoEmotions (28 labels → 8 radar axes)."""
+
+    def __init__(self, model_name: str = "SamLowe/roberta-base-go_emotions-onnx"):
+        log.info(f"Loading emotion model: {model_name}...")
+        cache_dir = MODELS_DIR / "emotion"
+        cache_dir.mkdir(exist_ok=True)
+
+        if model_name.endswith("-onnx"):
+            from optimum.onnxruntime import ORTModelForSequenceClassification
+            from transformers import pipeline, AutoTokenizer
+            ort_model = ORTModelForSequenceClassification.from_pretrained(
+                model_name, cache_dir=str(cache_dir))
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_name, cache_dir=str(cache_dir))
+            self.classifier = pipeline(
+                "text-classification", model=ort_model, tokenizer=tokenizer, top_k=None)
+        else:
+            from transformers import pipeline
+            self.classifier = pipeline(
+                "text-classification", model=model_name, top_k=None,
+                model_kwargs={"cache_dir": str(cache_dir)})
+
+        self.model_name = model_name
+        log.info(f"Emotion model loaded: {model_name}")
+
+    def classify(self, text: str) -> dict:
+        """Classify text and return 8-axis radar scores + dominant axis.
+
+        Returns:
+            {"axis_scores": {joy: 0.0-1.0, ...}, "dominant": "curiosity", "raw_label": "curiosity"}
+        """
+        if not text or not text.strip():
+            return {"axis_scores": {a: 0.0 for a in _RADAR_AXES}, "dominant": "neutral", "raw_label": "neutral"}
+
+        raw_scores = self.classifier(text[:512])  # truncate to model max
+        if not raw_scores or not raw_scores[0]:
+            return {"axis_scores": {a: 0.0 for a in _RADAR_AXES}, "dominant": "neutral", "raw_label": "neutral"}
+
+        # Sum into 8 radar axes
+        axis_scores = {a: 0.0 for a in _RADAR_AXES}
+        for s in raw_scores[0]:
+            axis = _EMOTION_TO_AXIS.get(s["label"], s["label"])
+            if axis in axis_scores:
+                axis_scores[axis] += s["score"]
+
+        # Dominant axis (prefer non-neutral)
+        non_neutral = {k: v for k, v in axis_scores.items() if k != "neutral"}
+        dominant = max(non_neutral, key=non_neutral.get) if non_neutral else "neutral"
+        if non_neutral.get(dominant, 0) < 0.05:
+            dominant = "neutral"
+
+        # Top raw label
+        raw_non_neutral = [s for s in raw_scores[0] if s["label"] != "neutral"]
+        if raw_non_neutral and max(raw_non_neutral, key=lambda x: x["score"])["score"] >= 0.05:
+            raw_label = max(raw_non_neutral, key=lambda x: x["score"])["label"]
+        else:
+            raw_label = max(raw_scores[0], key=lambda x: x["score"])["label"]
+
+        return {"axis_scores": axis_scores, "dominant": dominant, "raw_label": raw_label}
+
+    def unload(self):
+        del self.classifier
+        self.classifier = None
 
 
 # ===================================================================
@@ -2617,6 +2703,24 @@ async def face_delete(name: str):
     raise HTTPException(404, f"Face '{name}' not found")
 
 
+# -- Emotion Classification Routes -------------------------------------
+
+@app.post("/emotion/text")
+async def emotion_classify_text(text: str = Form(...)):
+    """Classify text emotion → 8-axis radar scores."""
+    if "emotion" not in SERVICES:
+        raise HTTPException(503, "Emotion service not loaded")
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(
+            _INFERENCE_POOL, SERVICES["emotion"].classify, text
+        )
+        return result
+    except Exception as e:
+        log.error(f"Emotion classification error: {traceback.format_exc()}")
+        raise HTTPException(500, str(e))
+
+
 # -- Model Management --------------------------------------------------
 
 @app.get("/models/status")
@@ -3054,7 +3158,7 @@ def parse_args():
     )
     p.add_argument("--port", type=int, default=int(cfg["server"]["port"]))
     p.add_argument("--host", default="0.0.0.0")
-    p.add_argument("--services", nargs="+", choices=["stt", "tts", "llm", "vision", "imagegen", "musicgen", "embeddings", "facerecognition"], default=None)
+    p.add_argument("--services", nargs="+", choices=["stt", "tts", "llm", "vision", "imagegen", "musicgen", "embeddings", "facerecognition", "emotion"], default=None)
     p.add_argument("--no-stt", action="store_true", default=not cfg.getboolean("services", "stt"))
     p.add_argument("--no-tts", action="store_true", default=not cfg.getboolean("services", "tts"))
     p.add_argument("--no-llm", action="store_true", default=not cfg.getboolean("services", "llm"))
@@ -3062,6 +3166,8 @@ def parse_args():
     p.add_argument("--no-imagegen", action="store_true", default=not cfg.getboolean("services", "imagegen"))
     p.add_argument("--no-musicgen", action="store_true", default=not cfg.getboolean("services", "musicgen"))
     p.add_argument("--no-embeddings", action="store_true", default=not cfg.getboolean("services", "embeddings"))
+    p.add_argument("--no-facerecognition", action="store_true", default=not cfg.getboolean("services", "facerecognition"))
+    p.add_argument("--no-emotion", action="store_true", default=not cfg.getboolean("services", "emotion"))
     p.add_argument("--whisper-model", default=cfg["stt"]["whisper_model"])
     p.add_argument("--whisper-compute", default=cfg["stt"]["compute_type"])
     p.add_argument("--voices-dir", default=cfg["tts"]["voices_dir"] or None)
@@ -3079,15 +3185,16 @@ def parse_args():
 def resolve_services(args) -> list[str]:
     if args.services:
         return args.services
-    services = ["stt", "tts", "llm", "vision", "imagegen", "musicgen", "embeddings"]
-    if args.no_stt: services.remove("stt")
-    if args.no_tts: services.remove("tts")
-    if args.no_llm: services.remove("llm")
-    if args.no_vision: services.remove("vision")
-    if args.no_imagegen: services.remove("imagegen")
-    if args.no_musicgen: services.remove("musicgen")
-    if args.no_embeddings: services.remove("embeddings")
-    return services
+    # All possible services — filtered by --no-* flags (which default from config)
+    _ALL = ["stt", "tts", "llm", "vision", "imagegen", "musicgen",
+            "embeddings", "facerecognition", "emotion"]
+    _NO_FLAGS = {
+        "stt": args.no_stt, "tts": args.no_tts, "llm": args.no_llm,
+        "vision": args.no_vision, "imagegen": args.no_imagegen,
+        "musicgen": args.no_musicgen, "embeddings": args.no_embeddings,
+        "facerecognition": args.no_facerecognition, "emotion": args.no_emotion,
+    }
+    return [s for s in _ALL if not _NO_FLAGS.get(s, False)]
 
 
 def _detect_llm_backend(model_path: str) -> str:
@@ -3158,6 +3265,9 @@ def _load_single_service(name: str, args):
     elif name == "facerecognition":
         model = cfg.get("facerecognition", "model", fallback="buffalo_sc")
         SERVICES["facerecognition"] = FaceService(model_name=model)
+    elif name == "emotion":
+        model = cfg.get("emotion", "model", fallback="SamLowe/roberta-base-go_emotions-onnx")
+        SERVICES["emotion"] = EmotionService(model_name=model)
 
 
 _SERVICE_PACKAGES = {
@@ -3171,6 +3281,7 @@ _SERVICE_PACKAGES = {
         "ace-step @ git+https://github.com/ace-step/ACE-Step.git",
     ],
     "embeddings": ["sentence-transformers>=2.2.0"],
+    "emotion":    ["optimum[onnxruntime]", "transformers"],
 }
 
 def _cleanup_stale_pip_dirs():
@@ -3305,7 +3416,7 @@ def load_services(args):
     log.info(f"Services to load: {', '.join(s.upper() for s in to_load)}")
 
     # CPU-only services can load in parallel with GPU services
-    _CPU_SERVICES = {"tts"}  # Piper uses ONNX on CPU, no GPU contention
+    _CPU_SERVICES = {"tts", "emotion"}  # ONNX on CPU, no GPU contention
     cpu_services = [s for s in to_load if s in _CPU_SERVICES]
     gpu_services = [s for s in to_load if s not in _CPU_SERVICES]
 

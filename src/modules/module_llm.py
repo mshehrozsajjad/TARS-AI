@@ -496,6 +496,44 @@ def detect_emotion_from_llm(emotion_str):
         return None, None, {}
 
 
+def detect_emotion_server(text):
+    """Send text to the companion server's /emotion/text endpoint.
+
+    Returns (top_axis, raw_label, axis_scores) — same format as local classifier.
+    Runs on the server's GoEmotions model, zero Pi RAM cost.
+    """
+    if not text or not text.strip():
+        return None, None, {}
+    try:
+        import requests
+        import os
+        server_url = CONFIG.get('AWARENESS', {}).get('server_url', '').strip()
+        if not server_url:
+            return None, None, {}
+
+        headers = {}
+        api_key = os.environ.get('EXTERNAL_API_KEY', '')
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        resp = requests.post(
+            f"{server_url}/emotion/text",
+            data={"text": text[:512]},
+            headers=headers,
+            timeout=3,
+        )
+        if resp.status_code != 200:
+            return None, None, {}
+
+        result = resp.json()
+        axis_scores = result.get("axis_scores", {})
+        dominant = result.get("dominant", "neutral")
+        raw_label = result.get("raw_label", "neutral")
+        return dominant, raw_label, axis_scores
+    except Exception:
+        return None, None, {}
+
+
 def _repair_truncated_json(s):
     """Repair truncated JSON by closing unclosed strings, brackets, and braces."""
     in_string = False

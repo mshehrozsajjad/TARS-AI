@@ -187,9 +187,10 @@ piper_speaker_anger = 7
 [EMOTION]
 # Enable emotion detection
 enabled = True
-# Emotion detection method: classifier | llm
-# classifier = local HuggingFace model (~500MB RAM, 28 fine-grained emotions)
+# Emotion detection method: classifier | llm | server
+# classifier = local HuggingFace model (~500MB RAM, 28 fine-grained emotions, Pi5 only)
 # llm = LLM returns emotion in its JSON response (zero extra RAM, uses your existing LLM)
+# server = offload to companion server's GoEmotions classifier (zero Pi RAM, full 28-emotion accuracy)
 emotion_method = llm
 # HuggingFace model for emotion analysis (only used when emotion_method = classifier)
 # Use the ONNX variant for faster CPU inference: SamLowe/roberta-base-go_emotions-onnx
