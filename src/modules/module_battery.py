@@ -62,10 +62,14 @@ class BatteryModule:
         self.zero_percent_start_time = None
         self.shutdown_delay_seconds = 60
 
-        self.voltage_history = deque(maxlen=15)
-        self.baseline_voltage = None
+        self.voltage_history = deque(maxlen=30)
         self.charging_state = "DISCHARGING"
         self.last_printed_state = None
+        # Dual EMA for charging detection:
+        # Fast EMA reacts in ~5 seconds, slow EMA reacts in ~60 seconds.
+        # When fast > slow + threshold → charging. When they converge → not charging.
+        self._ema_fast = None       # alpha=0.10, ~10 samples to settle
+        self._ema_slow = None       # alpha=0.01, ~100 samples to settle
 
         self.last_servo_activity_time = 0
         self.servo_cooldown_seconds = 10
@@ -127,7 +131,6 @@ class BatteryModule:
 
     def signal_servo_activity(self):
         self.last_servo_activity_time = time.time()
-        self.voltage_history.clear()
 
     def set_verbose(self, enabled):
         self.verbose = enabled
@@ -151,45 +154,54 @@ class BatteryModule:
             return int(normalized)  
         return int(percentage)
 
-    def _get_smoothed_voltage(self):
-        """Average of last 10 voltage readings to filter ±30mV noise."""
-        if len(self.voltage_history) < 10:
-            return None
-        return sum(list(self.voltage_history)[-10:]) / 10
-
     def _update_charging_state(self):
         if self._is_servo_cooldown_active():
             return
 
         self.voltage_history.append(self.voltage)
 
-        smoothed = self._get_smoothed_voltage()
-        if smoothed is None:
+        # Initialize both EMAs from first reading
+        if self._ema_fast is None:
+            self._ema_fast = self.voltage
+            self._ema_slow = self.voltage
             return
 
-        # Initialize baseline from first smoothed reading
-        if self.baseline_voltage is None:
-            self.baseline_voltage = smoothed
-            return
+        # Update EMAs — both always track, no freezing needed.
+        # Fast EMA (alpha=0.10): settles in ~5 seconds (10 samples)
+        # Slow EMA (alpha=0.01): settles in ~50 seconds (100 samples)
+        self._ema_fast += 0.10 * (self.voltage - self._ema_fast)
+        self._ema_slow += 0.01 * (self.voltage - self._ema_slow)
+
+        # Separation between fast and slow EMA in mV.
+        # When charger plugs in: fast jumps up quickly, slow lags → positive separation.
+        # When charger unplugs: fast drops quickly, slow lags → negative separation.
+        # Steady state (plugged or unplugged): both converge → separation ≈ 0.
+        # Normal noise: ±30mV raw → fast EMA filters to ±5mV → separation noise ≈ ±5mV.
+        separation = (self._ema_fast - self._ema_slow) * 1000  # mV
 
         was_charging = self.charging_state == "CHARGING"
 
-        # Baseline tracks actual voltage via EMA, but only when NOT charging.
-        # This keeps baseline at the "no-charger" voltage level.
-        # When charging, baseline freezes so elevation stays high.
-        if not was_charging:
-            self.baseline_voltage += 0.02 * (smoothed - self.baseline_voltage)
-
-        elevation = (smoothed - self.baseline_voltage) * 1000  # mV
-
-        # Charging detection via elevation above frozen baseline.
-        # Real charging: ~120mV above baseline (from profiling data).
-        # Normal noise after smoothing: ~±10mV.
-        # Enter charging at 80mV, exit at 30mV (hysteresis).
-        if elevation > 80:
+        # Enter CHARGING when fast EMA is 40mV above slow EMA (charger just plugged in).
+        # Stay CHARGING while separation > 5mV (fast still above slow).
+        # Once they converge (separation < 5mV), check voltage trend via history
+        # to determine if we're at a charging plateau or discharging.
+        if separation > 40:
             self.charging_state = "CHARGING"
-        elif was_charging and elevation > 30:
+        elif was_charging and separation > 5:
             self.charging_state = "CHARGING"
+        elif was_charging and separation <= 5:
+            # EMAs converged — are we at a charging plateau or did charger unplug?
+            # Check if voltage is rising: compare recent vs older readings.
+            if len(self.voltage_history) >= 20:
+                recent = sum(list(self.voltage_history)[-5:]) / 5
+                older = sum(list(self.voltage_history)[-20:-15]) / 5
+                if recent > older + 0.005:
+                    # Voltage still trending up — still charging
+                    self.charging_state = "CHARGING"
+                else:
+                    self.charging_state = "DISCHARGING"
+            else:
+                self.charging_state = "DISCHARGING"
         elif self.current > 50:
             self.charging_state = "DISCHARGING"
         else:
@@ -284,15 +296,11 @@ class BatteryModule:
         return self.normalized_percentage
 
     def print_debug(self):
-        baseline_str = f"{self.baseline_voltage:.3f}V" if self.baseline_voltage else "---"
-        smoothed = self._get_smoothed_voltage()
-        if smoothed and self.baseline_voltage:
-            elevation = (smoothed - self.baseline_voltage) * 1000
-        else:
-            elevation = 0
+        fast_str = f"{self._ema_fast:.3f}" if self._ema_fast else "---"
+        slow_str = f"{self._ema_slow:.3f}" if self._ema_slow else "---"
+        sep = (self._ema_fast - self._ema_slow) * 1000 if self._ema_fast and self._ema_slow else 0
         cooldown = "COOLDOWN" if self._is_servo_cooldown_active() else ""
-        smooth_str = f"{smoothed:.3f}" if smoothed else "---"
-        print(f"V: {self.voltage:.3f} (smooth: {smooth_str}, base: {baseline_str}, {elevation:+.0f}mV)  |  "
+        print(f"V: {self.voltage:.3f} (fast: {fast_str}, slow: {slow_str}, sep: {sep:+.0f}mV)  |  "
               f"I: {self.current:+.0f}mA  |  {self.charging_state} {cooldown}")
 
 

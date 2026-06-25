@@ -145,10 +145,9 @@ def _generate_reaction_line(event_name, config):
         prompt = (
             f"You are {char_name}. {_EVENT_DESCRIPTIONS.get(event_name, '')}\n"
             f"Current situation: {body_state or 'no context available'}\n\n"
-            f"React with ONE short sentence (under 12 words) — something natural, "
+            f"React with a dramatic and emotional reaction, "
             f"in-character, and fitting the situation. "
             f"Don't explain yourself. Just react. "
-            f"Reply with ONLY the sentence, nothing else."
         )
 
         queue_message(f"IMU: Generating LLM reaction for {event_name}...")
