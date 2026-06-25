@@ -415,8 +415,10 @@ class IMUManager:
                 self._state_entered_at = now
                 return
 
-        # ── Shaking (only when settled in a state, not during transitions) ──
-        if not in_transition and self._shake_count() >= SHAKE_COUNT_THRESHOLD:
+        # ── Shaking (only when already held and settled — can't shake
+        #    something sitting on a table, you have to pick it up first) ──
+        if self._physical_state == "held" and not in_transition \
+                and self._shake_count() >= SHAKE_COUNT_THRESHOLD:
             self._fire_event("shaking", now)
 
     def _fire_event(self, event_name, now):
