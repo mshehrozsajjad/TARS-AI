@@ -779,8 +779,8 @@ class ServoControllerGUI:
         
         self.leg_offset_info = {
             'perfectLeftHeightOffset': ('LEFT-HEIGHT', 0),
-            'perfectRightHeightOffset': ('RIGHT-HEIGHT', 1),
-            'perfectLeftLegOffset': ('LEFT-ROTATION', 2),
+            'perfectLeftLegOffset': ('LEFT-ROTATION', 1),
+            'perfectRightHeightOffset': ('RIGHT-HEIGHT', 2),
             'perfectRightLegOffset': ('RIGHT-ROTATION', 3)
         }
 
@@ -1353,7 +1353,7 @@ class ServoControllerGUI:
                         new_value = current_value + 5
 
                     channel = self.leg_offset_info[offset_name][1]
-                    if channel in [0, 1]:  
+                    if channel in [0, 2]:
                         base_up = int(servo_config.get('leftUpHeight' if channel == 0 else 'rightUpHeight', 350))
                         base_down = int(servo_config.get('leftDownHeight' if channel == 0 else 'rightDownHeight', 350))
                         target_up = base_up + new_value
@@ -1362,8 +1362,8 @@ class ServoControllerGUI:
                             self.set_status(f"! Value would exceed safe range (10-600)")
                             return
                     else:
-                        base_forward = int(servo_config.get('forwardLeftLeg' if channel == 2 else 'forwardRightLeg', 300))
-                        base_back = int(servo_config.get('backLeftLeg' if channel == 2 else 'backRightLeg', 300))
+                        base_forward = int(servo_config.get('forwardLeftLeg' if channel == 1 else 'forwardRightLeg', 300))
+                        base_back = int(servo_config.get('backLeftLeg' if channel == 1 else 'backRightLeg', 300))
                         target_forward = base_forward + new_value
                         target_back = base_back + new_value
                         if target_forward < 10 or target_forward > 600 or target_back < 10 or target_back > 600:
@@ -1678,8 +1678,8 @@ class ServoControllerGUI:
 def adjust_offsets():
     offsets = [
         ('perfectLeftHeightOffset', 'Left Height', 0),
-        ('perfectRightHeightOffset', 'Right Height', 1),
-        ('perfectLeftLegOffset', 'Left Leg', 2),
+        ('perfectLeftLegOffset', 'Left Leg', 1),
+        ('perfectRightHeightOffset', 'Right Height', 2),
         ('perfectRightLegOffset', 'Right Leg', 3),
         ('leftMainOffset', 'Left Main Arm', 4),
         ('leftForearmOffset', 'Left Forearm', 5),
@@ -1707,9 +1707,9 @@ def adjust_offsets():
                 offset_name, servo_name, channel = offsets[choice_num - 1]
                 current_value = offset_values.get(offset_name, 0)
 
-                if channel in [0, 1]:
+                if channel in [0, 2]:
                     base_pulse = 350
-                elif channel in [2, 3]:
+                elif channel in [1, 3]:
                     base_pulse = 300
                 elif channel == 4:
                     base_pulse = int(servo_config.get('leftMainMin', 550))
@@ -1777,8 +1777,8 @@ def adjust_offsets():
 def set_single_servo():
     servo_ranges = {
         0: ("Left Height", int(servo_config.get('leftUpHeight', 150)), int(servo_config.get('leftDownHeight', 550))),
-        1: ("Right Height", int(servo_config.get('rightUpHeight', 150)), int(servo_config.get('rightDownHeight', 550))),
-        2: ("Left Leg", int(servo_config.get('forwardLeftLeg', 100)), int(servo_config.get('backLeftLeg', 500))),
+        1: ("Left Leg", int(servo_config.get('forwardLeftLeg', 100)), int(servo_config.get('backLeftLeg', 500))),
+        2: ("Right Height", int(servo_config.get('rightUpHeight', 150)), int(servo_config.get('rightDownHeight', 550))),
         3: ("Right Leg", int(servo_config.get('forwardRightLeg', 100)), int(servo_config.get('backRightLeg', 500))),
         4: ("Left Main Arm", int(servo_config.get('leftMainMin', 50)), int(servo_config.get('leftMainMax', 550))),
         5: ("Left Forearm", int(servo_config.get('leftForarmMin', 50)), int(servo_config.get('leftForarmMax', 550))),
@@ -1791,11 +1791,11 @@ def set_single_servo():
     while True:
         try:
             print("\n=== SERVO PIN LAYOUT ===")
-            print("Height Servos:")
+            print("Left Side:")
             print(f"  #0 - Left Height    [{servo_ranges[0][1]} - {servo_ranges[0][2]}]")
-            print(f"  #1 - Right Height   [{servo_ranges[1][1]} - {servo_ranges[1][2]}]")
-            print("\nLeg Servos:")
-            print(f"  #2 - Left Leg       [{servo_ranges[2][1]} - {servo_ranges[2][2]}]")
+            print(f"  #1 - Left Leg       [{servo_ranges[1][1]} - {servo_ranges[1][2]}]")
+            print("\nRight Side:")
+            print(f"  #2 - Right Height   [{servo_ranges[2][1]} - {servo_ranges[2][2]}]")
             print(f"  #3 - Right Leg      [{servo_ranges[3][1]} - {servo_ranges[3][2]}]")
             print("\nLeft Arm Servos:")
             print(f"  #4 - Left Main Arm  [{servo_ranges[4][1]} - {servo_ranges[4][2]}]")

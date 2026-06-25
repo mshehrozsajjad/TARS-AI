@@ -320,14 +320,14 @@ arms_present = False
 leftUpHeight = 220
 leftDownHeight = 460
 perfectLeftHeightOffset = 0
-# Servo 1 - Right leg height
-rightUpHeight = 460
-rightDownHeight = 220
-perfectRightHeightOffset = 0
-# Servo 2 - Left leg swing
+# Servo 1 - Left leg swing
 forwardLeftLeg = 160
 backLeftLeg = 460
 perfectLeftLegOffset = 0
+# Servo 2 - Right leg height
+rightUpHeight = 460
+rightDownHeight = 220
+perfectRightHeightOffset = 0
 # Servo 3 - Right leg swing
 forwardRightLeg = 460
 backRightLeg = 160

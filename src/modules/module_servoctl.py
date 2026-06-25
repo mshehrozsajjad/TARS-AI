@@ -172,8 +172,8 @@ ARMS_PRESENT = config["SERVO"]["arms_present"]
 if not servo_positions:
     print("[SERVO] No saved positions - initializing to neutral estimates")
     servo_positions[0] = leftNeutralHeight
-    servo_positions[1] = rightNeutralHeight
-    servo_positions[2] = neutralLeftLeg
+    servo_positions[1] = neutralLeftLeg
+    servo_positions[2] = rightNeutralHeight
     servo_positions[3] = neutralRightLeg
     servo_positions[4] = leftMainMin
     servo_positions[5] = leftForarmMin
@@ -377,8 +377,8 @@ def reset_positions():
     # This ensures smooth movement from last known position to neutral
     neutral_defaults = {
         0: leftNeutralHeight,
-        1: rightNeutralHeight,
-        2: neutralLeftLeg,
+        1: neutralLeftLeg,
+        2: rightNeutralHeight,
         3: neutralRightLeg,
         4: leftMainMin,
         5: leftForarmMin,
@@ -435,8 +435,8 @@ def move_servos_synchronized(movements, speed_factor, easing_strength=None):
         if current_value is None:
             neutral_positions = {
                 0: leftNeutralHeight,
-                1: rightNeutralHeight,
-                2: neutralLeftLeg,
+                1: neutralLeftLeg,
+                2: rightNeutralHeight,
                 3: neutralRightLeg,
                 4: leftMainMin,
                 5: leftForarmMin,
@@ -541,18 +541,20 @@ def move_legs(left_height_percent=None, right_height_percent=None, left_leg_perc
 
     movements = []
     
+    # Channel mapping (physical wiring):
+    #   Ch0 = Left Height, Ch1 = Left Swing, Ch2 = Right Height, Ch3 = Right Swing
     if left_height_percent is not None and left_height_percent != 0:
         target_value = percentage_to_value(left_height_percent, leftUpHeight, leftDownHeight)
         movements.append((0, target_value))
-    
+
     if right_height_percent is not None and right_height_percent != 0:
         target_value = percentage_to_value(right_height_percent, rightUpHeight, rightDownHeight)
-        movements.append((1, target_value))
-    
+        movements.append((2, target_value))
+
     if left_leg_percent is not None and left_leg_percent != 0:
         target_value = percentage_to_value(left_leg_percent, forwardLeftLeg, backLeftLeg)
-        movements.append((2, target_value))
-    
+        movements.append((1, target_value))
+
     if right_leg_percent is not None and right_leg_percent != 0:
         target_value = percentage_to_value(right_leg_percent, forwardRightLeg, backRightLeg)
         movements.append((3, target_value))
