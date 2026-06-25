@@ -371,7 +371,7 @@ if __name__ == "__main__":
         if CONFIG.get('IMU', {}).get('imu_enabled', False):
             try:
                 from modules.module_imu import IMUManager
-                imu_manager = IMUManager(config=CONFIG, body_state_manager=body_state_manager)
+                imu_manager = IMUManager(config=CONFIG, body_state_manager=body_state_manager, ui_manager=ui_manager)
                 imu_manager.start()
                 queue_message("LOAD: IMU sensor started")
             except Exception as e:
@@ -531,7 +531,7 @@ if __name__ == "__main__":
     if CONFIG.get('IMU', {}).get('imu_enabled', False):
         try:
             from modules.module_imu import IMUManager
-            imu_manager = IMUManager(config=CONFIG, body_state_manager=body_state_manager)
+            imu_manager = IMUManager(config=CONFIG, body_state_manager=body_state_manager, ui_manager=ui_manager)
             imu_manager.start()
             queue_message("LOAD: IMU sensor started")
         except Exception as e:

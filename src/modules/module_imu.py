@@ -179,11 +179,12 @@ class IMUManager:
     WINDOW_SIZE = 25           # ~0.5s of readings at 50Hz
     EVENT_CHECK_INTERVAL = 0.2 # check events every 200ms (not every poll)
 
-    def __init__(self, config, body_state_manager=None):
+    def __init__(self, config, body_state_manager=None, ui_manager=None):
         global _instance
         _instance = self
 
         self._config = config
+        self._ui_manager = ui_manager
         imu_cfg = config.get("IMU", {})
         self._address = int(imu_cfg.get("imu_address", "0x68"), 16)
         self._event_cooldown = int(imu_cfg.get("imu_event_cooldown", 15))
@@ -462,6 +463,11 @@ class IMUManager:
 
         line = _generate_reaction_line(event_name, self._config)
         queue_message(f"IMU: Reaction ({event_name}) — \"{line}\"")
+
+        # Push to UI display (same as drives proactive speech)
+        if self._ui_manager:
+            char_name = self._config.get('CHAR', {}).get('character_name', 'TARS')
+            self._ui_manager.update_data(char_name, line, char_name)
 
         try:
             from modules.module_router import send
