@@ -148,6 +148,7 @@ def _generate_reaction_line(event_name, config):
             f"React with a dramatic and emotional reaction, "
             f"in-character, and fitting the situation. "
             f"Don't explain yourself. Just react. "
+            f"Reply with ONLY the sentence, nothing else."
         )
 
         queue_message(f"IMU: Generating LLM reaction for {event_name}...")
@@ -335,13 +336,19 @@ class IMUManager:
         """Count readings in gyro window above shake threshold."""
         return sum(1 for g in self._gyro_window if g > SHAKE_GYRO_THRESHOLD)
 
+    def _in_transition(self, now):
+        """True if a state change happened recently (suppress noisy events)."""
+        return now - self._state_entered_at < 2.0
+
     def _detect_events(self):
         """State machine for physical event detection.
 
         States: resting → held → resting (picked_up / set_down)
                 resting → knocked_over (sustained non-upright posture)
-                any → shaking (high gyro)
-                any → freefall (near-zero magnitude)
+
+        Shaking and freefall only fire outside of state transitions to
+        avoid false triggers during pickup/setdown (which naturally
+        produce gyro spikes and magnitude variance).
         """
         # Don't fire events during startup
         if time.time() - self._startup_time < 3.0:
@@ -349,22 +356,18 @@ class IMUManager:
 
         now = time.time()
         mag_var = self._mag_variance()
+        in_transition = self._in_transition(now)
 
         with self._lock:
             posture = self._posture
             gyro_total = self._reading["gyro_total"]
             magnitude = self._reading["magnitude"]
 
-        # ── Freefall (highest priority — time-critical) ──────────────
+        # ── Freefall (highest priority — always checked) ─────────────
         freefall_count = sum(1 for m in list(self._mag_window)[-5:]
                             if m < FREEFALL_THRESHOLD)
         if freefall_count >= FREEFALL_COUNT:
             self._fire_event("freefall", now)
-            return
-
-        # ── Shaking (check before state transitions) ─────────────────
-        if self._shake_count() >= SHAKE_COUNT_THRESHOLD:
-            self._fire_event("shaking", now)
             return
 
         # ── State machine transitions ────────────────────────────────
@@ -375,6 +378,7 @@ class IMUManager:
                 self._physical_state = "held"
                 self._state_entered_at = now
                 self._fire_event("picked_up", now)
+                return
 
             # Detect knocked over: posture leaves upright and stays
             elif posture in ("on side", "upside down"):
@@ -385,13 +389,13 @@ class IMUManager:
                     self._state_entered_at = now
                     self._fire_event("knocked_over", now)
                     self._off_upright_since = None
+                    return
             else:
                 self._off_upright_since = None
 
         elif self._physical_state == "held":
             # Detect set down: readings stabilize AND posture is upright
             if mag_var < STABLE_MAG_VARIANCE and posture == "upright":
-                # Require stability for at least a moment (not a brief pause)
                 if not hasattr(self, '_settling_since'):
                     self._settling_since = now
                 elif now - self._settling_since > 0.5:
@@ -399,6 +403,7 @@ class IMUManager:
                     self._state_entered_at = now
                     self._fire_event("set_down", now)
                     del self._settling_since
+                    return
             else:
                 if hasattr(self, '_settling_since'):
                     del self._settling_since
@@ -408,6 +413,11 @@ class IMUManager:
             if posture == "upright" and mag_var < STABLE_MAG_VARIANCE:
                 self._physical_state = "resting"
                 self._state_entered_at = now
+                return
+
+        # ── Shaking (only when settled in a state, not during transitions) ──
+        if not in_transition and self._shake_count() >= SHAKE_COUNT_THRESHOLD:
+            self._fire_event("shaking", now)
 
     def _fire_event(self, event_name, now):
         """Check cooldown, log, and trigger verbal reaction."""
