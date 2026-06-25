@@ -63,7 +63,10 @@ INVERTED_THRESHOLD = 135  # degrees — "upside down"
 
 # Stability — variance of magnitude over sliding window
 STABLE_MAG_VARIANCE   = 0.002   # below this = resting on surface
-UNSTABLE_MAG_VARIANCE = 0.008   # above this = being handled
+UNSTABLE_MAG_VARIANCE = 0.003   # above this = being handled (resting ~0.0001)
+
+# Pickup — gyro spike as alternative trigger (resting gyro ~3°/s)
+PICKUP_GYRO_THRESHOLD = 15.0    # °/s — immediate motion signal
 
 # Shaking — high gyro + high magnitude variance
 SHAKE_GYRO_THRESHOLD  = 30.0    # °/s total rotation rate
@@ -373,8 +376,12 @@ class IMUManager:
         # ── State machine transitions ────────────────────────────────
 
         if self._physical_state == "resting":
-            # Detect pickup: was stable, now unstable
-            if mag_var > UNSTABLE_MAG_VARIANCE:
+            # Detect pickup: magnitude variance spikes OR gyro spikes
+            # Gyro reacts instantly (>15°/s vs ~3°/s at rest), magnitude
+            # variance needs time to build in the sliding window
+            picked_up = (mag_var > UNSTABLE_MAG_VARIANCE
+                         or gyro_total > PICKUP_GYRO_THRESHOLD)
+            if picked_up:
                 self._physical_state = "held"
                 self._state_entered_at = now
                 self._fire_event("picked_up", now)
