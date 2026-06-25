@@ -433,6 +433,11 @@ def get_completion_simple(prompt, max_tokens=60):
             url = f"{CONFIG['LLM']['base_url']}/v1/chat/completions"
             model = CONFIG['LLM']['other_model']
 
+        # Use fast/cheap model if configured (for proactive speech, IMU reactions, etc.)
+        simple_model = CONFIG['LLM'].get('simple_model', '')
+        if simple_model:
+            model = simple_model
+
         # Reasoning models (gpt-5*, o1, o3, o4) reject temperature and max_tokens
         _is_reasoning = model.startswith(("gpt-5", "o1", "o3", "o4"))
 

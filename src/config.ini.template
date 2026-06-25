@@ -53,6 +53,9 @@ temperature = 0.8
 top_p = 0.9
 # Force JSON output via API (True/False). Disable for backends that don't support response_format (e.g. LM Studio)
 json_mode = True
+# Fast/cheap model for internal one-shot calls (proactive speech, IMU reactions).
+# Uses same backend/API key. Leave blank to use the main model.
+simple_model =
 # Token counting encoding — only change if token errors occur (cl100k_base works for most models)
 override_encoding_model = cl100k_base
 

@@ -463,6 +463,7 @@ def load_config():
             "other_model": config.get('LLM', 'other_model', fallback=''),
             "gemini_model": config.get('LLM', 'gemini_model', fallback='gemini-2.5-flash'),
             "grok_model": config['LLM']['grok_model'],
+            "simple_model": config.get('LLM', 'simple_model', fallback='').strip(),
             "systemprompt": config['LLM']['systemprompt'],
             "contextsize": int(config['LLM']['contextsize']),
             "max_tokens": int(config['LLM']['max_tokens']),
