@@ -248,9 +248,17 @@ class BodyStateManager:
         if temp is not None and temp > 65:
             parts.append(f"running warm ({temp:.0f}C)")
 
-        # IMU posture (only if not upright)
+        # IMU physical state
+        imu_event = s.sensors.get("imu_event")
+        imu_state = s.sensors.get("imu_state")
         imu_posture = s.sensors.get("imu_posture")
-        if imu_posture and imu_posture != "upright":
+        if imu_event:
+            parts.append(f"just {imu_event.replace('_', ' ')}")
+        elif imu_state == "held":
+            parts.append("being held")
+        elif imu_state == "knocked_over":
+            parts.append("knocked over")
+        elif imu_posture and imu_posture not in ("upright",):
             parts.append(imu_posture)
 
         # Mood (skip if neutral/low)

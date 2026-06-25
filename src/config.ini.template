@@ -318,6 +318,8 @@ battery_cutoff_voltage = 10
 imu_enabled = False
 # I2C address (0x68 default, 0x69 if AD0 pin high)
 imu_address = 0x68
+# Seconds between verbal reactions to same event type
+imu_event_cooldown = 15
 
 [SERVO]
 # True if arm servos are physically installed (affects movement calculations)

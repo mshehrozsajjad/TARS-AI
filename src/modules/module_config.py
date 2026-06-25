@@ -591,6 +591,7 @@ def load_config():
         "IMU": {
             "imu_enabled": config.getboolean('IMU', 'imu_enabled', fallback=False),
             "imu_address": config.get('IMU', 'imu_address', fallback='0x68'),
+            "imu_event_cooldown": int(config.get('IMU', 'imu_event_cooldown', fallback='15')),
         },
         "LIVEKIT": {
             "conversation_mode": config.get('LIVEKIT', 'conversation_mode', fallback='standard'),

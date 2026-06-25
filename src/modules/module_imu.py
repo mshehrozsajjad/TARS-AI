@@ -3,9 +3,10 @@ module_imu.py
 
 MPU6050 IMU sensor module for TARS-AI physical awareness.
 
-Reads 6-axis accelerometer + gyroscope data over I2C and exposes
-orientation/posture to the body state system. Designed as a foundation
-for Phase 2 event detection (pickup, fall, shake, tilt reactions).
+Reads 6-axis accelerometer + gyroscope data over I2C, detects physical
+events (picked up, set down, knocked over, shaking, freefall), and
+triggers verbal reactions via the LLM + router — same pattern as the
+drives proactive speech system.
 
 Sensor mounting on TARS:
   X-axis = vertical (up when positive, ax ~+1g at rest)
@@ -17,8 +18,12 @@ optional INA219 battery sensor (0x41). Default address: 0x68.
 """
 
 import math
+import random
 import time
 import threading
+from collections import deque
+from datetime import datetime
+
 import smbus2
 
 from modules.module_messageQue import queue_message
@@ -50,13 +55,129 @@ TILT_THRESHOLD     = 20   # degrees — "tilted"
 ON_SIDE_THRESHOLD  = 55   # degrees — "on side" / "on back"
 INVERTED_THRESHOLD = 135  # degrees — "upside down"
 
+# ── Event Detection Thresholds ───────────────────────────────────────────────
+# Calibrated from real sensor data:
+#   Stable on table:  mag variance ~0.0001, gyro ~3°/s
+#   Held in air:      mag variance ~0.01-0.05, gyro spikes
+#   Shaking:          mag swings 0.84-1.29g, rapid direction changes
+
+# Stability — variance of magnitude over sliding window
+STABLE_MAG_VARIANCE   = 0.002   # below this = resting on surface
+UNSTABLE_MAG_VARIANCE = 0.008   # above this = being handled
+
+# Shaking — high gyro + high magnitude variance
+SHAKE_GYRO_THRESHOLD  = 30.0    # °/s total rotation rate
+SHAKE_COUNT_THRESHOLD = 5       # readings above threshold in window
+
+# Freefall — magnitude near zero
+FREEFALL_THRESHOLD    = 0.3     # g — below this = freefall
+FREEFALL_COUNT        = 3       # consecutive readings needed
+
+# Knocked over — sustained posture change
+KNOCKOVER_HOLD_TIME   = 2.0     # seconds in on_side before triggering
+
+# ── Fallback Lines ───────────────────────────────────────────────────────────
+
+_FALLBACK_LINES = {
+    "picked_up": [
+        "Oh. We're doing this now.",
+        "I was comfortable down there.",
+        "Hello there.",
+        "Careful with me.",
+    ],
+    "set_down": [
+        "Back to solid ground.",
+        "Thank you for putting me down.",
+        "Ah, stability. I missed that.",
+        "Good. I prefer being stationary.",
+    ],
+    "knocked_over": [
+        "I appear to have fallen over.",
+        "This is not my preferred orientation.",
+        "I'd appreciate being upright again.",
+        "Well, this is undignified.",
+    ],
+    "shaking": [
+        "I'd appreciate it if you stopped that.",
+        "That's not helping anyone.",
+        "My sensors are getting dizzy.",
+        "Okay, okay. I get the point.",
+    ],
+    "freefall": [
+        "Oh no.",
+        "This is not ideal.",
+        "Gravity. Right.",
+        "Falling.",
+    ],
+}
+
+# ── Event Descriptions (for LLM prompt) ─────────────────────────────────────
+
+_EVENT_DESCRIPTIONS = {
+    "picked_up": "Someone just picked you up off the surface you were resting on.",
+    "set_down": "Someone just set you back down on a surface after holding you.",
+    "knocked_over": "You've been knocked over or tipped onto your side.",
+    "shaking": "Someone is shaking you.",
+    "freefall": "You're in freefall — someone dropped you or you fell.",
+}
+
+
+def _generate_reaction_line(event_name, config):
+    """Generate a context-aware reaction line using the LLM.
+
+    Falls back to hardcoded templates if the LLM is unavailable.
+    Same pattern as drives._generate_proactive_line().
+    """
+    # Build compact situation context
+    body_state = ""
+    try:
+        from modules.module_body_state import get_body_state_manager
+        bsm = get_body_state_manager()
+        if bsm is not None:
+            body_state = bsm.get_compact_prompt()
+    except Exception:
+        pass
+
+    try:
+        from modules.module_llm import get_completion_simple
+        char_name = config.get('CHAR', {}).get('character_name', 'TARS')
+
+        prompt = (
+            f"You are {char_name}. {_EVENT_DESCRIPTIONS.get(event_name, '')}\n"
+            f"Current situation: {body_state or 'no context available'}\n\n"
+            f"React with ONE short sentence (under 12 words) — something natural, "
+            f"in-character, and fitting the situation. "
+            f"Don't explain yourself. Just react. "
+            f"Reply with ONLY the sentence, nothing else."
+        )
+
+        queue_message(f"IMU: Generating LLM reaction for {event_name}...")
+        line = get_completion_simple(prompt)
+        queue_message(f"IMU: LLM returned: {line!r}")
+        if line and line.strip():
+            line = line.strip().strip('"\'').strip('*').strip()
+            if line and len(line) < 200:
+                return line
+            else:
+                queue_message(f"IMU: LLM line too long ({len(line)} chars), using fallback")
+        else:
+            queue_message("IMU: LLM returned empty, using fallback")
+    except Exception as e:
+        queue_message(f"IMU: LLM generation failed: {e}, using fallback")
+
+    # Fallback to hardcoded templates
+    fallback = _FALLBACK_LINES.get(event_name, _FALLBACK_LINES["knocked_over"])
+    return random.choice(fallback)
+
 
 # ── Manager ──────────────────────────────────────────────────────────────────
 
 class IMUManager:
-    """Reads MPU6050 sensor and exposes posture to body state."""
+    """Reads MPU6050 sensor, detects physical events, triggers verbal reactions."""
 
-    POLL_INTERVAL = 0.02  # 50Hz
+    POLL_INTERVAL = 0.02       # 50Hz sensor polling
+    WINDOW_SIZE = 25           # ~0.5s of readings at 50Hz
+    EVENT_CHECK_INTERVAL = 0.2 # check events every 200ms (not every poll)
 
     def __init__(self, config, body_state_manager=None):
         global _instance
@@ -65,6 +186,12 @@ class IMUManager:
         self._config = config
         imu_cfg = config.get("IMU", {})
         self._address = int(imu_cfg.get("imu_address", "0x68"), 16)
+        self._event_cooldown = int(imu_cfg.get("imu_event_cooldown", 15))
+
+        # Quiet hours (reuse drives config if available)
+        drives_cfg = config.get("DRIVES", {})
+        self._quiet_start = int(drives_cfg.get("quiet_start", 23))
+        self._quiet_end = int(drives_cfg.get("quiet_end", 7))
 
         self._bus = None
         self._sensor_ok = False
@@ -84,6 +211,31 @@ class IMUManager:
         # Derived posture
         self._posture = "upright"
 
+        # Sliding window for event detection
+        self._mag_window = deque(maxlen=self.WINDOW_SIZE)
+        self._gyro_window = deque(maxlen=self.WINDOW_SIZE)
+        self._tilt_window = deque(maxlen=self.WINDOW_SIZE)
+
+        # Event state machine
+        self._physical_state = "resting"  # resting, held, knocked_over
+        self._state_entered_at = time.time()
+
+        # Posture tracking for knock-over detection
+        self._off_upright_since = None  # timestamp when posture left "upright"
+
+        # Event cooldowns: {event_name: last_triggered_timestamp}
+        self._last_event = {
+            "picked_up": 0, "set_down": 0,
+            "knocked_over": 0, "shaking": 0, "freefall": 0,
+        }
+
+        # Recent event for body_state prompt (clears after 30s)
+        self._recent_event = None
+        self._recent_event_time = 0
+
+        # Startup grace period — don't fire events in first 3 seconds
+        self._startup_time = time.time()
+
         # Initialize hardware
         self._init_sensor()
 
@@ -100,7 +252,6 @@ class IMUManager:
             # Verify sensor identity
             who = self._bus.read_byte_data(self._address, REG_WHO_AM_I)
             if who not in (0x68, 0x72, 0x73, 0x98):
-                # Some clones report different WHO_AM_I values
                 queue_message(f"WARNING: IMU WHO_AM_I=0x{who:02X} (expected 0x68)")
 
             # Wake from sleep
@@ -150,17 +301,10 @@ class IMUManager:
 
         On this TARS build, the X-axis points up. Tilt is the angle
         between the acceleration vector and the X-axis (gravity direction).
-
-        Standing upright: ~4°   (ax ~+1g, ay ~0, az ~0)
-        Forward tilt:     ~19°  (az shifts negative)
-        On back:          ~92°  (gravity moves to Z-axis)
-        Upside down:      ~180° (ax ~-1g)
         """
         magnitude = math.sqrt(ax * ax + ay * ay + az * az)
         if magnitude < 0.1:
-            # Near-freefall — can't determine orientation
             return 0.0, magnitude
-        # acos(ax / magnitude) = angle between accel vector and X-axis
         ratio = max(-1.0, min(1.0, ax / magnitude))
         tilt = math.degrees(math.acos(ratio))
         return tilt, magnitude
@@ -177,12 +321,161 @@ class IMUManager:
         else:
             return "upside down"
 
+    # ── Event Detection ──────────────────────────────────────────────────
+
+    def _mag_variance(self):
+        """Compute variance of magnitude readings in the sliding window."""
+        if len(self._mag_window) < 5:
+            return 0.0
+        values = list(self._mag_window)
+        mean = sum(values) / len(values)
+        return sum((v - mean) ** 2 for v in values) / len(values)
+
+    def _shake_count(self):
+        """Count readings in gyro window above shake threshold."""
+        return sum(1 for g in self._gyro_window if g > SHAKE_GYRO_THRESHOLD)
+
+    def _detect_events(self):
+        """State machine for physical event detection.
+
+        States: resting → held → resting (picked_up / set_down)
+                resting → knocked_over (sustained non-upright posture)
+                any → shaking (high gyro)
+                any → freefall (near-zero magnitude)
+        """
+        # Don't fire events during startup
+        if time.time() - self._startup_time < 3.0:
+            return
+
+        now = time.time()
+        mag_var = self._mag_variance()
+
+        with self._lock:
+            posture = self._posture
+            gyro_total = self._reading["gyro_total"]
+            magnitude = self._reading["magnitude"]
+
+        # ── Freefall (highest priority — time-critical) ──────────────
+        freefall_count = sum(1 for m in list(self._mag_window)[-5:]
+                            if m < FREEFALL_THRESHOLD)
+        if freefall_count >= FREEFALL_COUNT:
+            self._fire_event("freefall", now)
+            return
+
+        # ── Shaking (check before state transitions) ─────────────────
+        if self._shake_count() >= SHAKE_COUNT_THRESHOLD:
+            self._fire_event("shaking", now)
+            return
+
+        # ── State machine transitions ────────────────────────────────
+
+        if self._physical_state == "resting":
+            # Detect pickup: was stable, now unstable
+            if mag_var > UNSTABLE_MAG_VARIANCE:
+                self._physical_state = "held"
+                self._state_entered_at = now
+                self._fire_event("picked_up", now)
+
+            # Detect knocked over: posture leaves upright and stays
+            elif posture in ("on side", "upside down"):
+                if self._off_upright_since is None:
+                    self._off_upright_since = now
+                elif now - self._off_upright_since > KNOCKOVER_HOLD_TIME:
+                    self._physical_state = "knocked_over"
+                    self._state_entered_at = now
+                    self._fire_event("knocked_over", now)
+                    self._off_upright_since = None
+            else:
+                self._off_upright_since = None
+
+        elif self._physical_state == "held":
+            # Detect set down: readings stabilize AND posture is upright
+            if mag_var < STABLE_MAG_VARIANCE and posture == "upright":
+                # Require stability for at least a moment (not a brief pause)
+                if not hasattr(self, '_settling_since'):
+                    self._settling_since = now
+                elif now - self._settling_since > 0.5:
+                    self._physical_state = "resting"
+                    self._state_entered_at = now
+                    self._fire_event("set_down", now)
+                    del self._settling_since
+            else:
+                if hasattr(self, '_settling_since'):
+                    del self._settling_since
+
+        elif self._physical_state == "knocked_over":
+            # Recovery: posture returns to upright and stable
+            if posture == "upright" and mag_var < STABLE_MAG_VARIANCE:
+                self._physical_state = "resting"
+                self._state_entered_at = now
+
+    def _fire_event(self, event_name, now):
+        """Check cooldown, log, and trigger verbal reaction."""
+        # Cooldown check
+        if now - self._last_event.get(event_name, 0) < self._event_cooldown:
+            return
+
+        self._last_event[event_name] = now
+
+        # Update recent event for body_state
+        with self._lock:
+            self._recent_event = event_name
+            self._recent_event_time = now
+
+        queue_message(f"IMU: Event detected — {event_name}")
+
+        # Trigger verbal reaction on background thread
+        threading.Thread(
+            target=self._speak_reaction,
+            args=(event_name,),
+            name=f"imu-react-{event_name}",
+            daemon=True,
+        ).start()
+
+    def _is_quiet_hours(self):
+        """Check if current time is within quiet hours (no verbal reactions).
+
+        Uses same quiet hours config as drives system.
+        """
+        hour = datetime.now().hour
+        if self._quiet_start > self._quiet_end:
+            return hour >= self._quiet_start or hour < self._quiet_end
+        else:
+            return self._quiet_start <= hour < self._quiet_end
+
+    def _speak_reaction(self, event_name):
+        """Generate and speak a verbal reaction to a physical event.
+
+        Runs on a background thread. Same pattern as drives._maybe_speak().
+        """
+        if self._is_quiet_hours():
+            return
+
+        # Don't speak if TARS is already talking or thinking
+        try:
+            from modules.module_state import get_tars_state, TarsState
+            state = get_tars_state()
+            if state in (TarsState.TALKING, TarsState.THINKING):
+                return
+        except Exception:
+            pass
+
+        line = _generate_reaction_line(event_name, self._config)
+        queue_message(f"IMU: Reaction ({event_name}) — \"{line}\"")
+
+        try:
+            from modules.module_router import send
+            send(line)
+        except Exception as e:
+            queue_message(f"WARNING: IMU reaction speech failed: {e}")
+
     # ── Polling loop ─────────────────────────────────────────────────────
 
     def _poll_loop(self):
-        """Background thread: read sensor and update state."""
+        """Background thread: read sensor, update state, detect events."""
         consecutive_errors = 0
         max_consecutive_errors = 10
+        last_event_check = 0
 
         while self._running:
             try:
@@ -202,6 +495,17 @@ class IMUManager:
                         "gyro_total": gyro_total,
                     }
                     self._posture = posture
+
+                # Update sliding windows
+                self._mag_window.append(magnitude)
+                self._gyro_window.append(gyro_total)
+                self._tilt_window.append(tilt)
+
+                # Check events at lower frequency (every ~200ms)
+                now = time.monotonic()
+                if now - last_event_check > self.EVENT_CHECK_INTERVAL:
+                    last_event_check = now
+                    self._detect_events()
 
                 consecutive_errors = 0
 
@@ -264,16 +568,28 @@ class IMUManager:
         with self._lock:
             return self._posture
 
+    def get_physical_state(self):
+        """Return the current physical state (resting, held, knocked_over)."""
+        return self._physical_state
+
     def get_sensor_data(self):
         """Return dict for body_state sensor registration.
 
         Called by BodyStateManager._read_sensors() via registered callback.
         """
         with self._lock:
+            # Clear recent event after 30s
+            recent = self._recent_event
+            if recent and time.time() - self._recent_event_time > 30:
+                self._recent_event = None
+                recent = None
+
             return {
                 "imu_posture": self._posture,
                 "imu_magnitude": round(self._reading["magnitude"], 2),
                 "imu_tilt": round(self._reading["tilt"], 1),
+                "imu_state": self._physical_state,
+                "imu_event": recent,
             }
 
     @property
