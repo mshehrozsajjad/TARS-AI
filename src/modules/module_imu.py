@@ -7,6 +7,11 @@ Reads 6-axis accelerometer + gyroscope data over I2C and exposes
 orientation/posture to the body state system. Designed as a foundation
 for Phase 2 event detection (pickup, fall, shake, tilt reactions).
 
+Sensor mounting on TARS:
+  X-axis = vertical (up when positive, ax ~+1g at rest)
+  Y-axis = lateral (left/right)
+  Z-axis = forward/back (forward when negative)
+
 The MPU6050 shares I2C bus 1 with the PCA9685 servo driver (0x40) and
 optional INA219 battery sensor (0x41). Default address: 0x68.
 """
@@ -38,10 +43,12 @@ REG_WHO_AM_I     = 0x75
 ACCEL_SCALE = 16384.0  # LSB/g
 GYRO_SCALE  = 131.0    # LSB/(°/s)
 
-# Posture thresholds (degrees from upright)
-TILT_THRESHOLD    = 30   # degrees — "tilted"
-ON_SIDE_THRESHOLD = 60   # degrees — "on side"
-INVERTED_THRESHOLD = 140  # degrees — "upside down"
+# Posture thresholds (tilt from vertical in degrees)
+# Calibrated from real sensor data:
+#   Standing: tilt ~4°, Forward tilt: ~19°, On back: ~92°
+TILT_THRESHOLD     = 20   # degrees — "tilted"
+ON_SIDE_THRESHOLD  = 55   # degrees — "on side" / "on back"
+INVERTED_THRESHOLD = 135  # degrees — "upside down"
 
 
 # ── Manager ──────────────────────────────────────────────────────────────────
@@ -70,7 +77,8 @@ class IMUManager:
             "ax": 0.0, "ay": 0.0, "az": 0.0,
             "gx": 0.0, "gy": 0.0, "gz": 0.0,
             "magnitude": 1.0,
-            "pitch": 0.0, "roll": 0.0,
+            "tilt": 0.0,
+            "gyro_total": 0.0,
         }
 
         # Derived posture
@@ -137,25 +145,37 @@ class IMUManager:
     # ── Derived values ───────────────────────────────────────────────────
 
     @staticmethod
-    def _compute_orientation(ax, ay, az):
-        """Compute pitch and roll from accelerometer (degrees)."""
-        pitch = math.degrees(math.atan2(-ax, math.sqrt(ay * ay + az * az)))
-        roll = math.degrees(math.atan2(ay, az))
-        return pitch, roll
+    def _compute_tilt(ax, ay, az):
+        """Compute tilt from vertical in degrees.
+
+        On this TARS build, the X-axis points up. Tilt is the angle
+        between the acceleration vector and the X-axis (gravity direction).
+
+        Standing upright: ~4°   (ax ~+1g, ay ~0, az ~0)
+        Forward tilt:     ~19°  (az shifts negative)
+        On back:          ~92°  (gravity moves to Z-axis)
+        Upside down:      ~180° (ax ~-1g)
+        """
+        magnitude = math.sqrt(ax * ax + ay * ay + az * az)
+        if magnitude < 0.1:
+            # Near-freefall — can't determine orientation
+            return 0.0, magnitude
+        # acos(ax / magnitude) = angle between accel vector and X-axis
+        ratio = max(-1.0, min(1.0, ax / magnitude))
+        tilt = math.degrees(math.acos(ratio))
+        return tilt, magnitude
 
     @staticmethod
-    def _classify_posture(pitch, roll):
-        """Classify posture from pitch/roll angles."""
-        tilt_angle = math.sqrt(pitch * pitch + roll * roll)
-
-        if tilt_angle > INVERTED_THRESHOLD:
-            return "upside down"
-        elif tilt_angle > ON_SIDE_THRESHOLD:
-            return "on side"
-        elif tilt_angle > TILT_THRESHOLD:
-            return "tilted"
-        else:
+    def _classify_posture(tilt):
+        """Classify posture from tilt angle (degrees from vertical)."""
+        if tilt < TILT_THRESHOLD:
             return "upright"
+        elif tilt < ON_SIDE_THRESHOLD:
+            return "tilted"
+        elif tilt < INVERTED_THRESHOLD:
+            return "on side"
+        else:
+            return "upside down"
 
     # ── Polling loop ─────────────────────────────────────────────────────
 
@@ -169,16 +189,17 @@ class IMUManager:
                 ax, ay, az = self._read_raw_accel()
                 gx, gy, gz = self._read_raw_gyro()
 
-                magnitude = math.sqrt(ax * ax + ay * ay + az * az)
-                pitch, roll = self._compute_orientation(ax, ay, az)
-                posture = self._classify_posture(pitch, roll)
+                tilt, magnitude = self._compute_tilt(ax, ay, az)
+                posture = self._classify_posture(tilt)
+                gyro_total = math.sqrt(gx * gx + gy * gy + gz * gz)
 
                 with self._lock:
                     self._reading = {
                         "ax": ax, "ay": ay, "az": az,
                         "gx": gx, "gy": gy, "gz": gz,
                         "magnitude": magnitude,
-                        "pitch": pitch, "roll": roll,
+                        "tilt": tilt,
+                        "gyro_total": gyro_total,
                     }
                     self._posture = posture
 
@@ -252,6 +273,7 @@ class IMUManager:
             return {
                 "imu_posture": self._posture,
                 "imu_magnitude": round(self._reading["magnitude"], 2),
+                "imu_tilt": round(self._reading["tilt"], 1),
             }
 
     @property
