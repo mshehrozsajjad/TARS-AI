@@ -10,6 +10,8 @@ Requirements:
   - NVIDIA GPU recommended (8+ GB VRAM for best performance)
   - Works on CPU too, just slower
 
+python app-server.py --services vision emotion facerecognition
+
 
 ================================================================================
   WINDOWS SETUP
