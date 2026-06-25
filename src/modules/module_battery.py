@@ -18,15 +18,29 @@ This license applies only to this file and does not override licenses of other f
 """
 import time
 import threading
-import board
-import adafruit_ina260
+import smbus2
 from collections import deque
 from modules.module_config import load_config
 
 CONFIG = load_config()
 
+# INA219 register addresses
+_INA219_REG_CONFIG      = 0x00
+_INA219_REG_SHUNT_V     = 0x01
+_INA219_REG_BUS_V       = 0x02
+_INA219_REG_POWER       = 0x03
+_INA219_REG_CURRENT     = 0x04
+_INA219_REG_CALIBRATION = 0x05
+
+# INA219 constants
+_INA219_ADDR        = 0x41
+_INA219_SHUNT_R     = 0.1     # 100 mΩ shunt resistor
+_INA219_CURRENT_LSB = 0.1     # mA per LSB (matches calibration value 4096)
+_INA219_POWER_LSB   = 2.0     # mW per LSB (20 * current_LSB)
+
+
 class BatteryModule:
-    def __init__(self, 
+    def __init__(self,
                  battery_capacity_mAh=CONFIG['BATTERY']['battery_capacity_mAh'],
                  battery_initial_voltage=CONFIG['BATTERY']['battery_initial_voltage'],
                  battery_cutoff_voltage=CONFIG['BATTERY']['battery_cutoff_voltage'],
@@ -37,34 +51,79 @@ class BatteryModule:
         self.battery_cutoff_voltage = battery_cutoff_voltage
         self.auto_shutdown = auto_shutdown
         self.smoothing_window = smoothing_window
-        self.current = 0.0  
-        self.voltage = 0.0  
-        self.power = 0.0  
+        self.current = 0.0
+        self.voltage = 0.0
+        self.power = 0.0
         self.battery_percentage = 0.0
-        self.normalized_percentage = 0  
+        self.normalized_percentage = 0
         self.percentage_history = deque(maxlen=smoothing_window)
         self.is_running = False
         self.thread = None
         self.zero_percent_start_time = None
         self.shutdown_delay_seconds = 60
-        
+
         self.voltage_history = deque(maxlen=15)
         self.baseline_voltage = None
         self.charging_state = "DISCHARGING"
         self.last_printed_state = None
-        
+
         self.last_servo_activity_time = 0
         self.servo_cooldown_seconds = 10
         self.verbose = False
 
         try:
-            self.i2c = board.I2C()
-            self.ina260 = adafruit_ina260.INA260(self.i2c, address=0x41)
+            self._bus = smbus2.SMBus(1)
+            self._ina219_configure()
+            # Verify sensor responds with a test read
+            self._ina219_read_bus_voltage()
             self.sensor_initialized = True
-            print("INA260 sensor detected")
+            print("INA219 sensor detected")
         except Exception as e:
-            print(f"INA260 sensor not detected: {e}")
+            print(f"INA219 sensor not detected: {e}")
+            self._bus = None
             self.sensor_initialized = False
+
+    def _ina219_configure(self):
+        """Configure INA219: 32V bus range, ±320mV shunt, 12-bit, continuous."""
+        # Config: BRNG=01(32V), PG=11(±320mV), BADC=0011(12-bit), SADC=011(12-bit), MODE=111(continuous)
+        config = 0x399F
+        self._bus.write_i2c_block_data(_INA219_ADDR, _INA219_REG_CONFIG,
+                                       [(config >> 8) & 0xFF, config & 0xFF])
+        time.sleep(0.01)
+        # Calibration: CAL = trunc(0.04096 / (current_LSB * R_shunt))
+        # With current_LSB=0.0001A and R_shunt=0.1Ω: CAL = 4096
+        cal = 4096
+        self._bus.write_i2c_block_data(_INA219_ADDR, _INA219_REG_CALIBRATION,
+                                       [(cal >> 8) & 0xFF, cal & 0xFF])
+        time.sleep(0.01)
+
+    def _ina219_read_signed(self, reg):
+        """Read a signed 16-bit big-endian value from INA219."""
+        data = self._bus.read_i2c_block_data(_INA219_ADDR, reg, 2)
+        value = (data[0] << 8) | data[1]
+        if value >= 0x8000:
+            value -= 0x10000
+        return value
+
+    def _ina219_read_unsigned(self, reg):
+        """Read an unsigned 16-bit big-endian value from INA219."""
+        data = self._bus.read_i2c_block_data(_INA219_ADDR, reg, 2)
+        return (data[0] << 8) | data[1]
+
+    def _ina219_read_bus_voltage(self):
+        """Read bus voltage in volts. LSB = 4mV, bits [15:3]."""
+        raw = self._ina219_read_unsigned(_INA219_REG_BUS_V)
+        return (raw >> 3) * 0.004
+
+    def _ina219_read_current(self):
+        """Read calibrated current in mA."""
+        raw = self._ina219_read_signed(_INA219_REG_CURRENT)
+        return raw * _INA219_CURRENT_LSB
+
+    def _ina219_read_power(self):
+        """Read calibrated power in mW."""
+        raw = self._ina219_read_unsigned(_INA219_REG_POWER)
+        return raw * _INA219_POWER_LSB
 
     def signal_servo_activity(self):
         self.last_servo_activity_time = time.time()
@@ -143,9 +202,9 @@ class BatteryModule:
         print("Battery monitoring started")
         while self.is_running and self.sensor_initialized:
             try:
-                self.current = self.ina260.current  
-                self.voltage = self.ina260.voltage  
-                self.power = self.ina260.power  
+                self.voltage = self._ina219_read_bus_voltage()
+                self.current = self._ina219_read_current()
+                self.power = self._ina219_read_power()
                 self.battery_percentage = self.calculate_battery_percentage(self.voltage)
                 self.normalized_percentage = self.normalize_percentage(self.battery_percentage)
                 
@@ -231,3 +290,16 @@ class BatteryModule:
         cooldown = "COOLDOWN" if self._is_servo_cooldown_active() else ""
         print(f"V: {self.voltage:.3f} (base: {baseline_str}, {elevation:+.0f}mV)  |  "
               f"I: {self.current:+.0f}mA  |  {self.charging_state} {cooldown}")
+
+
+# Module-level singleton accessor for dashboard/chatui
+_battery_instance = None
+
+def set_battery_instance(instance):
+    global _battery_instance
+    _battery_instance = instance
+
+def get_battery_status():
+    if _battery_instance is not None:
+        return _battery_instance.get_battery_status()
+    return {'sensor_initialized': False}

@@ -293,7 +293,9 @@ if __name__ == "__main__":
 
     # Battery module (only if enabled in config)
     if CONFIG['BATTERY'].get('battery_enabled', False):
+        from modules.module_battery import set_battery_instance
         battery = BatteryModule()
+        set_battery_instance(battery)
         battery.start()
     else:
         battery = None
