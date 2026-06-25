@@ -72,8 +72,10 @@ PICKUP_GYRO_THRESHOLD = 15.0    # °/s — immediate motion signal
 SURFACE_GYRO_THRESHOLD = 5.0    # °/s — on table ~3, in hand ~6-10
 SETDOWN_SETTLE_TIME    = 1.5    # seconds of sustained stillness required
 
-# Shaking — high gyro + high magnitude variance
-SHAKE_GYRO_THRESHOLD  = 30.0    # °/s total rotation rate
+# Shaking — only violent shaking, not normal handling
+# Normal handling peaks ~50°/s with rare spikes to ~90°/s (1-2 readings)
+# Violent shaking sustains 60-140°/s (10+ readings above 80°/s)
+SHAKE_GYRO_THRESHOLD  = 80.0    # °/s total rotation rate
 SHAKE_COUNT_THRESHOLD = 5       # readings above threshold in window
 
 # Freefall — magnitude near zero
@@ -430,10 +432,9 @@ class IMUManager:
                 self._state_entered_at = now
                 return
 
-        # ── Shaking (only when already held and settled — can't shake
-        #    something sitting on a table, you have to pick it up first) ──
-        if self._physical_state == "held" and not in_transition \
-                and self._shake_count() >= SHAKE_COUNT_THRESHOLD:
+        # ── Shaking (80°/s threshold means only violent shaking triggers,
+        #    so no state or grace period restrictions needed) ──
+        if self._shake_count() >= SHAKE_COUNT_THRESHOLD:
             self._fire_event("shaking", now)
 
     def _fire_event(self, event_name, now):
