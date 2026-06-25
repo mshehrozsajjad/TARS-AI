@@ -69,8 +69,11 @@ UNSTABLE_MAG_VARIANCE = 0.003   # above this = being handled (resting ~0.0001)
 PICKUP_GYRO_THRESHOLD = 15.0    # °/s — immediate motion signal
 
 # Set down — require surface-level stillness (hand tremor > this)
-SURFACE_GYRO_THRESHOLD = 5.0    # °/s — on table ~3, in hand ~6-10
-SETDOWN_SETTLE_TIME    = 1.5    # seconds of sustained stillness required
+# On table gyro is consistently 3.2-3.6°/s. In hand, micro-movements
+# push above 4°/s frequently. 3s ensures a hand can't fake a surface.
+SURFACE_GYRO_THRESHOLD = 4.0    # °/s — tight margin above surface baseline
+SURFACE_TILT_THRESHOLD = 8.0    # degrees — on table ~4-5°, in hand ~8-15°
+SETDOWN_SETTLE_TIME    = 3.0    # seconds of sustained stillness required
 
 # Shaking — only violent shaking, not normal handling
 # Normal handling peaks ~50°/s with rare spikes to ~90°/s (1-2 readings)
@@ -407,11 +410,14 @@ class IMUManager:
                 self._off_upright_since = None
 
         elif self._physical_state == "held":
-            # Detect set down: stable magnitude + low gyro + upright.
-            # Gyro distinguishes surface (~3°/s) from steady hand (~6-10°/s).
+            # Detect set down: stable magnitude + low gyro + near-perfect tilt.
+            # On surface: gyro ~3.5°/s, tilt ~4-5°. In hand: gyro drifts,
+            # tilt ~8-15°. All three must hold for 3s to confirm surface.
+            with self._lock:
+                tilt = self._reading["tilt"]
             on_surface = (mag_var < STABLE_MAG_VARIANCE
                           and gyro_total < SURFACE_GYRO_THRESHOLD
-                          and posture == "upright")
+                          and tilt < SURFACE_TILT_THRESHOLD)
             if on_surface:
                 if not hasattr(self, '_settling_since'):
                     self._settling_since = now
