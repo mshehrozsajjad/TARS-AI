@@ -341,43 +341,39 @@ def main():
     time.sleep(1.0)
     sampler.set_phase("all_servos")
 
+    # Interleaved stepping (no threads — smbus2 isn't thread-safe for writes)
+    def sweep_all(targets, speed=0.5):
+        """Step all servos toward targets one step at a time, round-robin."""
+        active = []
+        for ch, target in targets.items():
+            current = SERVOS[ch]["_current"]
+            if current != target:
+                active.append({"ch": ch, "current": current, "target": target,
+                               "step": 1 if target > current else -1})
+        delay = 0.02 * (1.0 - speed)
+        while active:
+            for s in active:
+                s["current"] += s["step"]
+                pca_set_pwm(bus, s["ch"], s["current"])
+            active = [s for s in active if s["current"] != s["target"]]
+            time.sleep(delay)
+        for ch, target in targets.items():
+            SERVOS[ch]["_current"] = target
+
     # Sweep all to min
     print("  All → min...", flush=True)
-    threads = []
-    for ch, info in SERVOS.items():
-        t = threading.Thread(target=sweep_servo, args=(bus, ch, info["neutral"], info["min"], 0.5))
-        threads.append(t)
-        t.start()
-    for t in threads:
-        t.join()
-    for ch, info in SERVOS.items():
-        info["_current"] = info["min"]
+    sweep_all({ch: info["min"] for ch, info in SERVOS.items()})
     time.sleep(0.3)
 
     # Sweep all to max
     print("  All → max...", flush=True)
-    threads = []
-    for ch, info in SERVOS.items():
-        t = threading.Thread(target=sweep_servo, args=(bus, ch, info["min"], info["max"], 0.5))
-        threads.append(t)
-        t.start()
-    for t in threads:
-        t.join()
-    for ch, info in SERVOS.items():
-        info["_current"] = info["max"]
+    sweep_all({ch: info["max"] for ch, info in SERVOS.items()})
     time.sleep(0.3)
 
     # Return all to neutral
     print("  All → neutral...", flush=True)
-    threads = []
-    for ch, info in SERVOS.items():
-        t = threading.Thread(target=sweep_servo, args=(bus, ch, info["max"], info["neutral"], 0.5))
-        threads.append(t)
-        t.start()
-    for t in threads:
-        t.join()
-    for ch, info in SERVOS.items():
-        info["_current"] = info["neutral"]
+    sweep_all({ch: info["neutral"] for ch, info in SERVOS.items()})
+    time.sleep(0.3)
 
     sampler.set_phase("final_settle")
     time.sleep(2.0)
