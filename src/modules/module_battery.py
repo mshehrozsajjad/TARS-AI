@@ -152,7 +152,7 @@ class BatteryModule:
         return int(percentage)
 
     def _get_voltage_trend(self):
-        if len(self.voltage_history) < 3:
+        if len(self.voltage_history) < 8:
             return 0.0
         voltages = list(self.voltage_history)
         total_change = sum(voltages[i] - voltages[i-1] for i in range(1, len(voltages)))
@@ -161,25 +161,32 @@ class BatteryModule:
     def _update_charging_state(self):
         if self._is_servo_cooldown_active():
             return
-        
+
         self.voltage_history.append(self.voltage)
         trend = self._get_voltage_trend()
-        
-        if self.baseline_voltage is None and len(self.voltage_history) >= 5:
+
+        if self.baseline_voltage is None and len(self.voltage_history) >= 10:
             self.baseline_voltage = sum(self.voltage_history) / len(self.voltage_history)
-        
+
         if self.baseline_voltage is None:
             return
-        
+
         elevation = (self.voltage - self.baseline_voltage) * 1000
         was_charging = self.charging_state == "CHARGING"
-        
-        if trend > 0.002:
+
+        # Thresholds tuned for INA219 on Pi buck converter:
+        # Battery voltage fluctuates ±30mV under normal load.
+        # Real charging produces ~120mV sustained rise.
+        if trend > 0.005:
             self.charging_state = "CHARGING"
             self.baseline_voltage = min(self.baseline_voltage, min(list(self.voltage_history)[-5:]) - 0.02)
-        elif was_charging and elevation >= 5:
+        elif was_charging and elevation >= 20:
             self.charging_state = "CHARGING"
-        elif was_charging and elevation < 5 and trend < -0.002:
+        elif was_charging and elevation < 10 and trend < -0.003:
+            self.charging_state = "DISCHARGING"
+            self.baseline_voltage = sum(self.voltage_history) / len(self.voltage_history)
+        elif was_charging and trend < -0.005:
+            # Sustained voltage drop overrides sticky charging
             self.charging_state = "DISCHARGING"
             self.baseline_voltage = sum(self.voltage_history) / len(self.voltage_history)
         elif was_charging:
@@ -190,12 +197,8 @@ class BatteryModule:
                 self.baseline_voltage = min(self.baseline_voltage, self.voltage)
         else:
             self.charging_state = "IDLE"
-        
+
         if self.last_printed_state != self.charging_state:
-            if self.charging_state == "CHARGING":
-                pass
-            elif self.charging_state == "DISCHARGING":
-                pass
             self.last_printed_state = self.charging_state
 
     def _monitoring_loop(self):
