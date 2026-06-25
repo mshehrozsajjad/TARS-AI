@@ -231,6 +231,9 @@ class UIManagerLite(threading.Thread):
             prev_state = ""
             msgs_dirty = False
             was_screensaver = False
+            _last_batt_pct = -1
+            _last_batt_charging = False
+            _batt_surface = None
 
             while self.running and not self.shutdown_event.is_set():
                 if ss_mgr:
@@ -239,7 +242,7 @@ class UIManagerLite(threading.Thread):
                     else:
                         self._dirty.wait(timeout=1.0)
                 else:
-                    self._dirty.wait()
+                    self._dirty.wait(timeout=30.0)
                 self._dirty.clear()
 
                 if not self.running:
@@ -329,6 +332,26 @@ class UIManagerLite(threading.Thread):
                         lx = (logical_width - label.get_width()) // 2
                         ly = bar_y + (bar_h - label.get_height()) // 2
                         composed.blit(label, (lx, ly))
+
+                    # Battery indicator (right side of status bar)
+                    if self.battery_module and self.battery_module.sensor_initialized:
+                        batt_pct = self.battery_module.get_normalized_percentage()
+                        batt_chg = self.battery_module.is_charging()
+                        if batt_pct != _last_batt_pct or batt_chg != _last_batt_charging:
+                            _last_batt_pct = batt_pct
+                            _last_batt_charging = batt_chg
+                            if batt_pct > 50:
+                                batt_color = (0, 200, 100)
+                            elif batt_pct > 20:
+                                batt_color = (255, 200, 0)
+                            else:
+                                batt_color = (255, 68, 68)
+                            batt_text = f"{batt_pct}%+" if batt_chg else f"{batt_pct}%"
+                            _batt_surface = font.render(batt_text, True, batt_color)
+                        if _batt_surface:
+                            bx = logical_width - _batt_surface.get_width() - padding
+                            by = bar_y + (bar_h - _batt_surface.get_height()) // 2
+                            composed.blit(_batt_surface, (bx, by))
 
                     prev_state = state
 
