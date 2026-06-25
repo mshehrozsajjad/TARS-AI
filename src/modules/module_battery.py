@@ -151,50 +151,47 @@ class BatteryModule:
             return int(normalized)  
         return int(percentage)
 
-    def _get_voltage_trend(self):
-        if len(self.voltage_history) < 8:
-            return 0.0
-        voltages = list(self.voltage_history)
-        total_change = sum(voltages[i] - voltages[i-1] for i in range(1, len(voltages)))
-        return total_change / (len(voltages) - 1)
+    def _get_smoothed_voltage(self):
+        """Average of last 10 voltage readings to filter ±30mV noise."""
+        if len(self.voltage_history) < 10:
+            return None
+        return sum(list(self.voltage_history)[-10:]) / 10
 
     def _update_charging_state(self):
         if self._is_servo_cooldown_active():
             return
 
         self.voltage_history.append(self.voltage)
-        trend = self._get_voltage_trend()
 
-        if self.baseline_voltage is None and len(self.voltage_history) >= 10:
-            self.baseline_voltage = sum(self.voltage_history) / len(self.voltage_history)
-
-        if self.baseline_voltage is None:
+        smoothed = self._get_smoothed_voltage()
+        if smoothed is None:
             return
 
-        elevation = (self.voltage - self.baseline_voltage) * 1000
+        # Initialize baseline from first smoothed reading
+        if self.baseline_voltage is None:
+            self.baseline_voltage = smoothed
+            return
+
         was_charging = self.charging_state == "CHARGING"
 
-        # Thresholds tuned for INA219 on Pi buck converter:
-        # Battery voltage fluctuates ±30mV under normal load.
-        # Real charging produces ~120mV sustained rise.
-        if trend > 0.005:
+        # Baseline tracks actual voltage via EMA, but only when NOT charging.
+        # This keeps baseline at the "no-charger" voltage level.
+        # When charging, baseline freezes so elevation stays high.
+        if not was_charging:
+            self.baseline_voltage += 0.02 * (smoothed - self.baseline_voltage)
+
+        elevation = (smoothed - self.baseline_voltage) * 1000  # mV
+
+        # Charging detection via elevation above frozen baseline.
+        # Real charging: ~120mV above baseline (from profiling data).
+        # Normal noise after smoothing: ~±10mV.
+        # Enter charging at 80mV, exit at 30mV (hysteresis).
+        if elevation > 80:
             self.charging_state = "CHARGING"
-            self.baseline_voltage = min(self.baseline_voltage, min(list(self.voltage_history)[-5:]) - 0.02)
-        elif was_charging and elevation >= 20:
-            self.charging_state = "CHARGING"
-        elif was_charging and elevation < 10 and trend < -0.003:
-            self.charging_state = "DISCHARGING"
-            self.baseline_voltage = sum(self.voltage_history) / len(self.voltage_history)
-        elif was_charging and trend < -0.005:
-            # Sustained voltage drop overrides sticky charging
-            self.charging_state = "DISCHARGING"
-            self.baseline_voltage = sum(self.voltage_history) / len(self.voltage_history)
-        elif was_charging:
+        elif was_charging and elevation > 30:
             self.charging_state = "CHARGING"
         elif self.current > 50:
             self.charging_state = "DISCHARGING"
-            if trend < 0:
-                self.baseline_voltage = min(self.baseline_voltage, self.voltage)
         else:
             self.charging_state = "IDLE"
 
@@ -287,11 +284,15 @@ class BatteryModule:
         return self.normalized_percentage
 
     def print_debug(self):
-        trend = self._get_voltage_trend()
         baseline_str = f"{self.baseline_voltage:.3f}V" if self.baseline_voltage else "---"
-        elevation = (self.voltage - self.baseline_voltage) * 1000 if self.baseline_voltage else 0
+        smoothed = self._get_smoothed_voltage()
+        if smoothed and self.baseline_voltage:
+            elevation = (smoothed - self.baseline_voltage) * 1000
+        else:
+            elevation = 0
         cooldown = "COOLDOWN" if self._is_servo_cooldown_active() else ""
-        print(f"V: {self.voltage:.3f} (base: {baseline_str}, {elevation:+.0f}mV)  |  "
+        smooth_str = f"{smoothed:.3f}" if smoothed else "---"
+        print(f"V: {self.voltage:.3f} (smooth: {smooth_str}, base: {baseline_str}, {elevation:+.0f}mV)  |  "
               f"I: {self.current:+.0f}mA  |  {self.charging_state} {cooldown}")
 
 
