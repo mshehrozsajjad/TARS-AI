@@ -68,6 +68,10 @@ UNSTABLE_MAG_VARIANCE = 0.003   # above this = being handled (resting ~0.0001)
 # Pickup — gyro spike as alternative trigger (resting gyro ~3°/s)
 PICKUP_GYRO_THRESHOLD = 15.0    # °/s — immediate motion signal
 
+# Set down — require surface-level stillness (hand tremor > this)
+SURFACE_GYRO_THRESHOLD = 5.0    # °/s — on table ~3, in hand ~6-10
+SETDOWN_SETTLE_TIME    = 1.5    # seconds of sustained stillness required
+
 # Shaking — high gyro + high magnitude variance
 SHAKE_GYRO_THRESHOLD  = 30.0    # °/s total rotation rate
 SHAKE_COUNT_THRESHOLD = 5       # readings above threshold in window
@@ -401,11 +405,15 @@ class IMUManager:
                 self._off_upright_since = None
 
         elif self._physical_state == "held":
-            # Detect set down: readings stabilize AND posture is upright
-            if mag_var < STABLE_MAG_VARIANCE and posture == "upright":
+            # Detect set down: stable magnitude + low gyro + upright.
+            # Gyro distinguishes surface (~3°/s) from steady hand (~6-10°/s).
+            on_surface = (mag_var < STABLE_MAG_VARIANCE
+                          and gyro_total < SURFACE_GYRO_THRESHOLD
+                          and posture == "upright")
+            if on_surface:
                 if not hasattr(self, '_settling_since'):
                     self._settling_since = now
-                elif now - self._settling_since > 0.5:
+                elif now - self._settling_since > SETDOWN_SETTLE_TIME:
                     self._physical_state = "resting"
                     self._state_entered_at = now
                     self._fire_event("set_down", now)
