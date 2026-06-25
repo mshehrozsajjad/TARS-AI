@@ -588,6 +588,10 @@ def load_config():
             "battery_initial_voltage": float(config.get('BATTERY', 'battery_initial_voltage', fallback='12')),
             "battery_cutoff_voltage": float(config.get('BATTERY', 'battery_cutoff_voltage', fallback='10')),
         },
+        "IMU": {
+            "imu_enabled": config.getboolean('IMU', 'imu_enabled', fallback=False),
+            "imu_address": config.get('IMU', 'imu_address', fallback='0x68'),
+        },
         "LIVEKIT": {
             "conversation_mode": config.get('LIVEKIT', 'conversation_mode', fallback='standard'),
             "livekit_url": os.getenv('LIVEKIT_URL', ''),

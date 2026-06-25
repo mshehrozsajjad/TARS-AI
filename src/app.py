@@ -366,6 +366,17 @@ if __name__ == "__main__":
         except Exception as e:
             queue_message(f"WARNING: Body state system not available: {e}")
 
+        # IMU sensor (physical awareness)
+        imu_manager = None
+        if CONFIG.get('IMU', {}).get('imu_enabled', False):
+            try:
+                from modules.module_imu import IMUManager
+                imu_manager = IMUManager(config=CONFIG, body_state_manager=body_state_manager)
+                imu_manager.start()
+                queue_message("LOAD: IMU sensor started")
+            except Exception as e:
+                queue_message(f"WARNING: IMU sensor not available: {e}")
+
         # Start LiveKit client in a daemon thread
         from modules.module_livekit_client import start_livekit_client
         livekit_thread = threading.Thread(
@@ -393,6 +404,8 @@ if __name__ == "__main__":
         finally:
             from modules.module_livekit_client import stop_livekit_client
             stop_livekit_client()
+            if imu_manager is not None:
+                imu_manager.stop()
             if battery is not None:
                 battery.stop()
             queue_message("INFO: Shutdown complete.")
@@ -513,6 +526,17 @@ if __name__ == "__main__":
     except Exception as e:
         queue_message(f"WARNING: Body state system not available: {e}")
 
+    # === IMU Sensor (physical awareness) ===
+    imu_manager = None
+    if CONFIG.get('IMU', {}).get('imu_enabled', False):
+        try:
+            from modules.module_imu import IMUManager
+            imu_manager = IMUManager(config=CONFIG, body_state_manager=body_state_manager)
+            imu_manager.start()
+            queue_message("LOAD: IMU sensor started")
+        except Exception as e:
+            queue_message(f"WARNING: IMU sensor not available: {e}")
+
     # === Main Loop ===
     try:
         queue_message(f"LOAD: TARS-AI OS: {VERSION} running on {RASPBERRY_VERSION.upper()}")
@@ -555,6 +579,9 @@ if __name__ == "__main__":
         # Stop drives system
         if drives_manager is not None:
             drives_manager.stop()
+        # Stop IMU sensor
+        if imu_manager is not None:
+            imu_manager.stop()
         # Stop speaker ID if running
         try:
             from modules.module_speaker_id import get_speaker_id_manager

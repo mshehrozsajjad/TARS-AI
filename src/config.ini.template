@@ -313,6 +313,12 @@ battery_initial_voltage = 12
 # Minimum safe discharge voltage (3S LiPo: 10.5V, 4S: 14V)
 battery_cutoff_voltage = 10
 
+[IMU]
+# Enable MPU6050 IMU sensor for physical awareness (falling, pickup, tilt detection)
+imu_enabled = False
+# I2C address (0x68 default, 0x69 if AD0 pin high)
+imu_address = 0x68
+
 [SERVO]
 # True if arm servos are physically installed (affects movement calculations)
 arms_present = False
