@@ -37,8 +37,6 @@ from modules.module_movement_tuner import (
     generate_variations,
     find_worst_steps,
     score_movement,
-    IMURecorder,
-    score_per_step,
 )
 
 
@@ -95,32 +93,19 @@ def print_comparison(old_steps, old_scores, new_steps, new_scores, step_idx):
 # ── IMU initialization ──────────────────────────────────────────────────────
 
 def init_imu(config):
-    """Initialize IMU for the tuner.  Returns True if successful."""
+    """Initialize a lightweight direct IMU reader for the tuner.
+
+    Does NOT start the full IMUManager — no event detection, no TTS
+    reactions, no STT pausing.  Just raw sensor reads when we ask for them.
+    """
+    from modules.module_movement_tuner import init_direct_imu
+
     imu_cfg = config.get("IMU", {})
     imu_addr = int(imu_cfg.get("imu_address", "0x68"), 16)
 
-    # Try to use the full IMUManager (best: proven bus contention handling)
     try:
-        from modules.module_imu import IMUManager, get_imu_manager
-        if get_imu_manager() is None:
-            mgr = IMUManager(config)
-            if mgr.sensor_initialized:
-                mgr.start()
-                print(f"       MPU6050 IMU (0x{imu_addr:02X})   ... ok (IMUManager)")
-                return True
-        else:
-            print(f"       MPU6050 IMU (0x{imu_addr:02X})   ... ok (already running)")
-            return True
-    except Exception as e:
-        print(f"       IMUManager failed ({e}), trying direct...")
-
-    # Fallback: the IMURecorder's _DirectIMUReader will handle it
-    try:
-        import smbus2
-        bus = smbus2.SMBus(1)
-        bus.read_byte_data(imu_addr, 0x75)
-        bus.close()
-        print(f"       MPU6050 IMU (0x{imu_addr:02X})   ... ok (direct)")
+        init_direct_imu(address=imu_addr)
+        print(f"       MPU6050 IMU (0x{imu_addr:02X})   ... ok (direct, no events)")
         return True
     except Exception as e:
         print(f"       MPU6050 IMU           ... FAILED: {e}")
@@ -151,25 +136,20 @@ def do_profile(movement_name, steps, num_runs):
 # ── Optimization ─────────────────────────────────────────────────────────────
 
 def _run_single_trial(var_steps):
-    """Run a movement sequence once with IMU recording.  Returns (step_scores, overall_score)."""
-    servoctl.move_legs(50, 50, 50, 50, 0.5)
-    time.sleep(2.0)  # longer settle — let I2C bus recover from prior movement
+    """Run a movement sequence once with IMU scoring.  Returns (step_scores, overall_score).
 
-    recorder = IMURecorder()
-    if not recorder.start():
+    Uses synchronous IMU reads AFTER each step (bus is idle = reliable data).
+    """
+    from modules.module_movement_tuner import profile_single_run, _get_imu_source
+
+    servoctl.move_legs(50, 50, 50, 50, 0.5)
+    time.sleep(2.0)
+
+    imu_source = _get_imu_source()
+    if imu_source is None:
         return [], 0
 
-    servoctl.MOVING = True
-    try:
-        for i, step in enumerate(var_steps):
-            recorder.mark_step(i)
-            servoctl.move_legs(step[0], step[1], step[2], step[3], step[4])
-        time.sleep(0.5)  # capture settling after last step
-    finally:
-        servoctl.MOVING = False
-
-    recordings, markers = recorder.stop()
-    step_scores = score_per_step(recordings, markers)
+    step_scores = profile_single_run(var_steps, imu_source)
     overall = score_movement(step_scores)
     return step_scores, overall
 

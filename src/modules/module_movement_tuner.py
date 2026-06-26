@@ -317,6 +317,10 @@ class _DirectIMUReader:
         except Exception:
             return None
 
+    def get_reading(self):
+        """Alias for read() — matches IMUManager interface."""
+        return self.read()
+
 
 # ── Scoring ──────────────────────────────────────────────────────────────────
 
@@ -430,45 +434,142 @@ def score_movement(step_scores):
     return max(0, min(100, int(round(raw))))
 
 
+# ── Synchronous IMU burst read ───────────────────────────────────────────────
+#
+# The PCA9685 (servos) and MPU6050 (IMU) share I2C bus 1.  Reading IMU
+# while servos are actively moving causes bus contention and data loss.
+#
+# Solution: read IMU AFTER each move_legs() returns (servos are at their
+# targets, bus is idle).  A burst of 15 readings over ~300 ms gives
+# reliable tilt/gyro/yaw data for that step's resulting body position.
+
+IMU_BURST_COUNT    = 15    # readings per burst
+IMU_BURST_INTERVAL = 0.02  # 50 Hz
+IMU_SETTLE_TIME    = 0.15  # seconds after move_legs before reading
+
+
+# Module-level direct IMU reader (avoids starting the full IMUManager
+# which would run event detection, TTS reactions, etc.)
+_direct_imu = None
+
+
+def init_direct_imu(address=0x68):
+    """Initialize a lightweight direct IMU reader for the tuner.
+
+    No event detection, no reactions, no TTS — just raw sensor reads.
+    Call this instead of starting IMUManager in standalone tools.
+    """
+    global _direct_imu
+    _direct_imu = _DirectIMUReader(address)
+    return _direct_imu
+
+
+def _get_imu_source():
+    """Get the best available IMU reading source.
+
+    Prefers the direct reader (no event overhead) over IMUManager.
+    """
+    if _direct_imu is not None:
+        return _direct_imu
+    try:
+        from modules.module_imu import get_imu_manager
+        mgr = get_imu_manager()
+        if mgr and mgr.sensor_initialized:
+            return mgr
+    except Exception:
+        pass
+    return None
+
+
+def _read_imu_burst(imu_source):
+    """Take a burst of IMU readings (bus must be idle).  Returns step score dict."""
+    readings = []
+    for _ in range(IMU_BURST_COUNT + 5):  # extra attempts for discards
+        r = imu_source.get_reading()
+        if r and r["tilt"] > 0.5:
+            readings.append(r)
+        if len(readings) >= IMU_BURST_COUNT:
+            break
+        time.sleep(IMU_BURST_INTERVAL)
+
+    if len(readings) < 3:
+        return {"max_tilt": 0, "avg_tilt": 0, "max_gyro": 0, "avg_gyro": 0,
+                "wobble": 0, "avg_yaw": 0, "readings": 0}
+
+    tilts = [r["tilt"] for r in readings]
+    gyros = [r["gyro_total"] for r in readings]
+    yaws  = [r.get("gx", 0.0) for r in readings]
+
+    avg_tilt = sum(tilts) / len(tilts)
+    avg_gyro = sum(gyros) / len(gyros)
+    avg_yaw  = sum(yaws) / len(yaws)
+
+    if len(tilts) > 1:
+        variance = sum((t - avg_tilt) ** 2 for t in tilts) / len(tilts)
+        wobble = math.sqrt(variance)
+    else:
+        wobble = 0.0
+
+    return {
+        "max_tilt": round(max(tilts), 1),
+        "avg_tilt": round(avg_tilt, 1),
+        "max_gyro": round(max(gyros), 1),
+        "avg_gyro": round(avg_gyro, 1),
+        "wobble":   round(wobble, 1),
+        "avg_yaw":  round(avg_yaw, 1),
+        "readings": len(readings),
+    }
+
+
 # ── Profiling ────────────────────────────────────────────────────────────────
+
+def profile_single_run(steps, imu_source):
+    """Execute a step sequence once, reading IMU after each step.
+
+    Returns a list of per-step score dicts.
+    Reads IMU AFTER each move_legs() call — I2C bus is idle so reads are reliable.
+    """
+    import modules.module_servoctl as servoctl
+
+    step_scores = []
+
+    for i, step in enumerate(steps):
+        lh, rh, ls, rs, speed = step
+        servoctl.move_legs(lh, rh, ls, rs, speed)
+
+        # Brief pause for mechanical settling + bus idle
+        time.sleep(IMU_SETTLE_TIME)
+
+        # Burst-read IMU (bus is free now)
+        score = _read_imu_burst(imu_source)
+        score["step"] = i
+        step_scores.append(score)
+
+    return step_scores
+
 
 def profile_movement(steps, num_runs=3, reset_pause=2.0):
     """Run a movement sequence multiple times and return averaged per-step scores.
-
-    Between runs, returns to neutral and pauses for the body to settle.
 
     Returns:
         (avg_step_scores, overall_score, per_run_scores)
     """
     import modules.module_servoctl as servoctl
 
+    imu_source = _get_imu_source()
+    if imu_source is None:
+        print("  WARNING: IMU not available for profiling")
+        return [], 0, []
+
     all_run_scores = []
 
     for run in range(num_runs):
-        # Return to neutral and let the body settle
+        # Return to neutral and settle
         servoctl.move_legs(50, 50, 50, 50, 0.5)
         time.sleep(reset_pause)
 
-        # Start IMU recording
-        recorder = IMURecorder()
-        if not recorder.start():
-            print(f"  WARNING: IMU recording unavailable for run {run + 1}")
-            continue
-
-        # Execute the movement with step markers
-        servoctl.MOVING = True
-        try:
-            for i, step in enumerate(steps):
-                recorder.mark_step(i)
-                lh, rh, ls, rs, speed = step
-                servoctl.move_legs(lh, rh, ls, rs, speed)
-            time.sleep(0.3)  # capture settling after last step
-        finally:
-            servoctl.MOVING = False
-
-        # Stop recording and score
-        recordings, markers = recorder.stop()
-        step_scores = score_per_step(recordings, markers)
+        # Run the movement with per-step IMU reads
+        step_scores = profile_single_run(steps, imu_source)
         overall = score_movement(step_scores)
         all_run_scores.append((step_scores, overall))
 
@@ -476,22 +577,23 @@ def profile_movement(steps, num_runs=3, reset_pause=2.0):
         return [], 0, []
 
     # Average per-step scores across runs
-    num_steps = len(all_run_scores[0][0])
+    num_steps = len(steps)
     avg_scores = []
     for step_idx in range(num_steps):
         scores_for_step = [run[0][step_idx] for run in all_run_scores
                            if step_idx < len(run[0])]
         if not scores_for_step:
             continue
+        n = len(scores_for_step)
         avg_scores.append({
             "step": step_idx,
-            "max_tilt": round(sum(s["max_tilt"] for s in scores_for_step) / len(scores_for_step), 1),
-            "avg_tilt": round(sum(s["avg_tilt"] for s in scores_for_step) / len(scores_for_step), 1),
-            "max_gyro": round(sum(s["max_gyro"] for s in scores_for_step) / len(scores_for_step), 1),
-            "avg_gyro": round(sum(s["avg_gyro"] for s in scores_for_step) / len(scores_for_step), 1),
-            "wobble": round(sum(s["wobble"] for s in scores_for_step) / len(scores_for_step), 1),
-            "avg_yaw": round(sum(s.get("avg_yaw", 0) for s in scores_for_step) / len(scores_for_step), 1),
-            "readings": sum(s["readings"] for s in scores_for_step) // len(scores_for_step),
+            "max_tilt": round(sum(s["max_tilt"] for s in scores_for_step) / n, 1),
+            "avg_tilt": round(sum(s["avg_tilt"] for s in scores_for_step) / n, 1),
+            "max_gyro": round(sum(s["max_gyro"] for s in scores_for_step) / n, 1),
+            "avg_gyro": round(sum(s["avg_gyro"] for s in scores_for_step) / n, 1),
+            "wobble":   round(sum(s["wobble"]   for s in scores_for_step) / n, 1),
+            "avg_yaw":  round(sum(s.get("avg_yaw", 0) for s in scores_for_step) / n, 1),
+            "readings": sum(s["readings"] for s in scores_for_step) // n,
         })
 
     avg_overall = sum(r[1] for r in all_run_scores) // len(all_run_scores)
