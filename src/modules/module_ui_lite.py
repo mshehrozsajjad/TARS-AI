@@ -238,7 +238,7 @@ class UIManagerLite(threading.Thread):
             # Quiet hours indicator
             _quiet_start = int(CONFIG.get('DRIVES', {}).get('quiet_start', 23))
             _quiet_end = int(CONFIG.get('DRIVES', {}).get('quiet_end', 7))
-            _quiet_surface = font.render("\u263E", True, (120, 120, 180))  # ☾ moon
+            _quiet_surface = font.render("ZZZ", True, (120, 120, 180))
 
             while self.running and not self.shutdown_event.is_set():
                 if ss_mgr:
