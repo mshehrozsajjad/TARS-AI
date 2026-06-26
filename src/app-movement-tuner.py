@@ -184,6 +184,8 @@ def do_optimize(movement_name, steps, num_runs, max_steps_to_fix=3):
     avg_yaw = sum(s.get("avg_yaw", 0) for s in avg_scores) / max(len(avg_scores), 1)
     print(f"       Average yaw rate: {avg_yaw:+.1f}°/s", end="")
 
+    drift_was_corrected = False
+
     if abs(avg_yaw) < 3.0:
         print(" — minimal drift, skipping")
     else:
@@ -218,6 +220,7 @@ def do_optimize(movement_name, steps, num_runs, max_steps_to_fix=3):
                 best_bias = bias
 
         if best_bias != 0:
+            drift_was_corrected = True
             print(f"\n    -> Best bias: L{best_bias:+d} R{-best_bias:+d}")
             for i, step in enumerate(current_steps):
                 current_steps[i][2] = max(1, min(99, step[2] + best_bias))
@@ -228,15 +231,20 @@ def do_optimize(movement_name, steps, num_runs, max_steps_to_fix=3):
     # Phase 3: Identify and fix worst steps (per-step tuning)
     print(f"\n[3/5] Optimizing worst steps...")
 
-    # Re-profile with current (possibly bias-corrected) steps
-    avg_scores, current_score, _ = profile_movement(
-        current_steps, num_runs=2, reset_pause=2.0)
+    # Only re-profile if Phase 2 changed the steps, otherwise reuse Phase 1 data
+    if drift_was_corrected:
+        print("       Re-profiling after drift correction...")
+        avg_scores, current_score, _ = profile_movement(
+            current_steps, num_runs=2, reset_pause=2.0)
+    else:
+        current_score = baseline_score
 
     worst_indices = find_worst_steps(avg_scores, threshold=8.0)
     if not worst_indices:
         print("       No problematic steps found (all below 8° max tilt).")
     else:
         worst_indices = worst_indices[:max_steps_to_fix]
+        print(f"       Found {len(worst_indices)} steps to optimize")
 
         for target_idx in worst_indices:
             target_score = avg_scores[target_idx]
@@ -247,7 +255,7 @@ def do_optimize(movement_name, steps, num_runs, max_steps_to_fix=3):
 
             variations = generate_variations(current_steps, target_idx)
             best_variation = None
-            best_overall = current_score
+            best_trial_score = current_score
 
             for desc, var_steps in variations:
                 trial_scores, trial_overall = _run_single_trial(var_steps)
@@ -256,17 +264,18 @@ def do_optimize(movement_name, steps, num_runs, max_steps_to_fix=3):
                 if target_idx < len(trial_scores):
                     var_tilt = trial_scores[target_idx]["max_tilt"]
 
-                improved = trial_overall > best_overall
+                improved = trial_overall > best_trial_score
                 marker = " *best*" if improved else ""
                 print(f"    {desc:.<30} tilt={var_tilt:>5.1f}° score={trial_overall:>3}{marker}")
 
                 if improved:
-                    best_overall = trial_overall
+                    best_trial_score = trial_overall
                     best_variation = var_steps
 
             if best_variation:
                 new_step = best_variation[target_idx]
                 current_steps = best_variation
+                current_score = best_trial_score
                 print(f"    -> Best: ({new_step[0]},{new_step[1]},{new_step[2]},"
                       f"{new_step[3]} @{new_step[4]:.1f})")
             else:

@@ -315,6 +315,14 @@ class _DirectIMUReader:
                 "magnitude": mag,
             }
         except Exception:
+            # I2C bus may be in a bad state after TARS fell — reopen it
+            try:
+                import smbus2
+                self.bus.close()
+                self.bus = smbus2.SMBus(1)
+                self.bus.write_byte_data(self.address, self.REG_PWR_MGMT_1, 0x00)
+            except Exception:
+                pass
             return None
 
     def get_reading(self):
