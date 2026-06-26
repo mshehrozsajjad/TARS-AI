@@ -1,0 +1,15 @@
+{
+  "step_forward": {
+    "score": null,
+    "notes": "Reduced height range 30-70 to 38-62, slowed aggressive transitions, less forward swing",
+    "steps": [
+      [50, 50, 50, 50, 0.8],
+      [44, 44, 42, 42, 0.8],
+      [62, 62, 30, 30, 0.7],
+      [38, 38, 35, 35, 0.7],
+      [62, 62, 40, 40, 0.7],
+      [56, 56, 50, 50, 0.7],
+      [50, 50, 50, 50, 0.8]
+    ]
+  }
+}
