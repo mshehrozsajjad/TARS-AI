@@ -150,11 +150,35 @@ def do_profile(movement_name, steps, num_runs):
 
 # ── Optimization ─────────────────────────────────────────────────────────────
 
-def do_optimize(movement_name, steps, num_runs, max_steps_to_fix=4):
-    """Profile, identify worst steps, try variations, save the best."""
+def _run_single_trial(var_steps):
+    """Run a movement sequence once with IMU recording.  Returns (step_scores, overall_score)."""
+    servoctl.move_legs(50, 50, 50, 50, 0.5)
+    time.sleep(2.0)  # longer settle — let I2C bus recover from prior movement
+
+    recorder = IMURecorder()
+    if not recorder.start():
+        return [], 0
+
+    servoctl.MOVING = True
+    try:
+        for i, step in enumerate(var_steps):
+            recorder.mark_step(i)
+            servoctl.move_legs(step[0], step[1], step[2], step[3], step[4])
+        time.sleep(0.5)  # capture settling after last step
+    finally:
+        servoctl.MOVING = False
+
+    recordings, markers = recorder.stop()
+    step_scores = score_per_step(recordings, markers)
+    overall = score_movement(step_scores)
+    return step_scores, overall
+
+
+def do_optimize(movement_name, steps, num_runs, max_steps_to_fix=3):
+    """Profile, fix drift with global swing bias, fix worst steps, save."""
 
     # Phase 1: Profile baseline
-    print(f"\n[1/4] Profiling baseline ({num_runs} runs)...")
+    print(f"\n[1/5] Profiling baseline ({num_runs} runs)...")
     print("       TARS will move. Do not touch it.\n")
 
     avg_scores, baseline_score, per_run = profile_movement(
@@ -169,76 +193,107 @@ def do_optimize(movement_name, steps, num_runs, max_steps_to_fix=4):
     print(f"\n  Baseline score: {baseline_score}/100")
     print_step_table(steps, avg_scores)
 
-    # Phase 2: Identify and fix worst steps
-    print(f"\n[2/4] Optimizing worst steps...")
+    current_steps = [list(s) for s in steps]  # deep copy
+
+    # Phase 2: Fix drift with global swing bias
+    # Adjusts left vs right swing across ALL steps at once to counteract
+    # mechanical asymmetry that makes TARS turn instead of walking straight.
+    print(f"\n[2/5] Correcting drift (global swing bias)...")
+
+    # Check if there's meaningful yaw drift
+    avg_yaw = sum(s.get("avg_yaw", 0) for s in avg_scores) / max(len(avg_scores), 1)
+    print(f"       Average yaw rate: {avg_yaw:+.1f}°/s", end="")
+
+    if abs(avg_yaw) < 3.0:
+        print(" — minimal drift, skipping")
+    else:
+        drift_dir = "right" if avg_yaw > 0 else "left"
+        print(f" — drifting {drift_dir}")
+        print()
+
+        best_bias = 0
+        best_score = baseline_score
+
+        for bias in [-6, -4, -2, +2, +4, +6]:
+            # Apply swing bias: shift left swing by +bias, right swing by -bias
+            biased_steps = []
+            for step in current_steps:
+                lh, rh, ls, rs, speed = step
+                new_ls = max(1, min(99, ls + bias))
+                new_rs = max(1, min(99, rs - bias))
+                biased_steps.append([lh, rh, new_ls, new_rs, speed])
+
+            trial_scores, trial_overall = _run_single_trial(biased_steps)
+
+            # Get yaw from this trial
+            trial_yaw = sum(s.get("avg_yaw", 0) for s in trial_scores) / max(len(trial_scores), 1)
+
+            improved = trial_overall > best_score
+            marker = " *best*" if improved else ""
+            print(f"    bias L{bias:+d} R{-bias:+d}"
+                  f" .... score={trial_overall:>3}  yaw={trial_yaw:+.1f}°/s{marker}")
+
+            if improved:
+                best_score = trial_overall
+                best_bias = bias
+
+        if best_bias != 0:
+            print(f"\n    -> Best bias: L{best_bias:+d} R{-best_bias:+d}")
+            for i, step in enumerate(current_steps):
+                current_steps[i][2] = max(1, min(99, step[2] + best_bias))
+                current_steps[i][3] = max(1, min(99, step[3] - best_bias))
+        else:
+            print(f"\n    -> No bias improved the score, keeping symmetric")
+
+    # Phase 3: Identify and fix worst steps (per-step tuning)
+    print(f"\n[3/5] Optimizing worst steps...")
+
+    # Re-profile with current (possibly bias-corrected) steps
+    avg_scores, current_score, _ = profile_movement(
+        current_steps, num_runs=2, reset_pause=2.0)
 
     worst_indices = find_worst_steps(avg_scores, threshold=8.0)
     if not worst_indices:
         print("       No problematic steps found (all below 8° max tilt).")
-        print("       Movement is already well-tuned!")
-        return steps, baseline_score
+    else:
+        worst_indices = worst_indices[:max_steps_to_fix]
 
-    worst_indices = worst_indices[:max_steps_to_fix]
-    current_steps = [list(s) for s in steps]  # deep copy
+        for target_idx in worst_indices:
+            target_score = avg_scores[target_idx]
+            step_vals = current_steps[target_idx]
+            print(f"\n  Step {target_idx + 1} "
+                  f"({step_vals[0]},{step_vals[1]},{step_vals[2]},{step_vals[3]} "
+                  f"@{step_vals[4]:.1f}) — avg max_tilt={target_score['max_tilt']:.1f}°")
 
-    for target_idx in worst_indices:
-        target_score = avg_scores[target_idx]
-        step_vals = current_steps[target_idx]
-        print(f"\n  Step {target_idx + 1} "
-              f"({step_vals[0]},{step_vals[1]},{step_vals[2]},{step_vals[3]} "
-              f"@{step_vals[4]:.1f}) — avg max_tilt={target_score['max_tilt']:.1f}°")
+            variations = generate_variations(current_steps, target_idx)
+            best_variation = None
+            best_overall = current_score
 
-        variations = generate_variations(current_steps, target_idx)
-        best_variation = None
-        best_tilt = target_score["max_tilt"]
+            for desc, var_steps in variations:
+                trial_scores, trial_overall = _run_single_trial(var_steps)
 
-        for desc, var_steps in variations:
-            # Quick profile: 1 run per variation to save time
-            servoctl.move_legs(50, 50, 50, 50, 0.5)
-            time.sleep(1.5)
-
-            recorder = IMURecorder()
-            if not recorder.start():
-                continue
-
-            servoctl.MOVING = True
-            try:
-                for i, step in enumerate(var_steps):
-                    recorder.mark_step(i)
-                    servoctl.move_legs(step[0], step[1], step[2], step[3], step[4])
-                time.sleep(0.3)
-            finally:
-                servoctl.MOVING = False
-
-            recordings, markers = recorder.stop()
-            step_scores = score_per_step(recordings, markers)
-
-            if target_idx < len(step_scores):
-                var_tilt = step_scores[target_idx]["max_tilt"]
-            else:
                 var_tilt = 999
+                if target_idx < len(trial_scores):
+                    var_tilt = trial_scores[target_idx]["max_tilt"]
 
-            improved = var_tilt < best_tilt
-            marker = " *best*" if improved else ""
-            print(f"    {desc:.<30} max_tilt={var_tilt:>5.1f}°"
-                  f"{'  < better' if improved else ''}{marker}")
+                improved = trial_overall > best_overall
+                marker = " *best*" if improved else ""
+                print(f"    {desc:.<30} tilt={var_tilt:>5.1f}° score={trial_overall:>3}{marker}")
 
-            if improved:
-                best_tilt = var_tilt
-                best_variation = var_steps
+                if improved:
+                    best_overall = trial_overall
+                    best_variation = var_steps
 
-        if best_variation:
-            old_step = current_steps[target_idx]
-            new_step = best_variation[target_idx]
-            current_steps = best_variation
-            print(f"    -> Best: ({new_step[0]},{new_step[1]},{new_step[2]},"
-                  f"{new_step[3]} @{new_step[4]:.1f}) "
-                  f"tilt {target_score['max_tilt']:.1f}° -> {best_tilt:.1f}°")
-        else:
-            print(f"    -> No improvement found, keeping original")
+            if best_variation:
+                new_step = best_variation[target_idx]
+                current_steps = best_variation
+                print(f"    -> Best: ({new_step[0]},{new_step[1]},{new_step[2]},"
+                      f"{new_step[3]} @{new_step[4]:.1f})")
+            else:
+                print(f"    -> No improvement found, keeping original")
 
-    # Phase 3: Validate optimized sequence
-    print(f"\n[3/4] Validating optimized sequence ({num_runs} runs)...")
+    # Phase 4: Validate optimized sequence
+    print(f"\n[4/5] Validating optimized sequence ({num_runs} runs)...")
 
     val_scores, val_overall, val_runs = profile_movement(
         current_steps, num_runs=num_runs)
@@ -249,8 +304,8 @@ def do_optimize(movement_name, steps, num_runs, max_steps_to_fix=4):
     print(f"\n  Optimized score: {val_overall}/100 (was {baseline_score}/100)")
     print_step_table(current_steps, val_scores)
 
-    # Phase 4: Save
-    print(f"\n[4/4] Saving...")
+    # Phase 5: Save
+    print(f"\n[5/5] Saving...")
 
     if val_overall >= baseline_score:
         save_tuned_params(movement_name, current_steps, score=val_overall)

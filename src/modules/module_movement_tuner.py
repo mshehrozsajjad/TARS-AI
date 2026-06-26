@@ -238,11 +238,18 @@ class IMURecorder:
         while self._running:
             reading = self._get_reading()
             if reading:
+                tilt = reading["tilt"]
+                # Discard stale/initial readings — a standing robot always
+                # has at least ~2° of structural tilt.  0.0° means the IMU
+                # thread hasn't updated yet (I2C contention from servos).
+                if tilt < 0.5 and reading["gyro_total"] < 0.5:
+                    time.sleep(self._poll_interval)
+                    continue
                 self._recordings.append({
                     "t": time.monotonic(),
-                    "tilt": reading["tilt"],
+                    "tilt": tilt,
                     "gyro": reading["gyro_total"],
-                    "gx": reading.get("gx", 0.0),  # yaw rate (rotation around vertical)
+                    "gx": reading.get("gx", 0.0),
                     "ax": reading["ax"],
                     "ay": reading["ay"],
                     "az": reading["az"],
@@ -382,18 +389,24 @@ def score_movement(step_scores):
     """Compute an overall stability score (0-100) from per-step scores.
 
     100 = perfectly stable.  Penalizes high tilt, high gyro, wobble,
-    and yaw drift (turning instead of going straight).
+    yaw drift, and insufficient data (I2C contention).
     """
     if not step_scores:
         return 0
 
-    max_tilt = max(s["max_tilt"] for s in step_scores)
-    avg_wobble = sum(s["wobble"] for s in step_scores) / len(step_scores)
-    avg_gyro = sum(s["avg_gyro"] for s in step_scores) / len(step_scores)
+    # Count steps with actual IMU data (readings > 0)
+    steps_with_data = [s for s in step_scores if s["readings"] > 2]
+    if len(steps_with_data) < len(step_scores) // 2:
+        # More than half the steps have no data — unreliable, penalize hard
+        return 10
+
+    max_tilt = max(s["max_tilt"] for s in steps_with_data) if steps_with_data else 0
+    avg_wobble = sum(s["wobble"] for s in steps_with_data) / len(steps_with_data)
+    avg_gyro = sum(s["avg_gyro"] for s in steps_with_data) / len(steps_with_data)
 
     # Yaw drift: average yaw rate across all steps (consistent turning = bad)
     # abs() because turning left or right is equally bad for "walk straight"
-    avg_yaw = abs(sum(s.get("avg_yaw", 0) for s in step_scores) / len(step_scores))
+    avg_yaw = abs(sum(s.get("avg_yaw", 0) for s in steps_with_data) / len(steps_with_data))
 
     # Tilt penalty: 0 at 0°, 100 at 45°+
     tilt_penalty = min(100, (max_tilt / 45.0) * 100)
@@ -407,9 +420,13 @@ def score_movement(step_scores):
     # Yaw penalty: 0 at 0°/s, 100 at 20°/s+ sustained turning
     yaw_penalty = min(100, (avg_yaw / 20.0) * 100)
 
+    # Data coverage penalty: penalize if many steps had no IMU data
+    coverage = len(steps_with_data) / len(step_scores)
+    coverage_penalty = (1.0 - coverage) * 50  # up to 50 points off
+
     # Weighted combination — yaw gets meaningful weight
     raw = 100 - (tilt_penalty * 0.4 + wobble_penalty * 0.2
-                 + gyro_penalty * 0.15 + yaw_penalty * 0.25)
+                 + gyro_penalty * 0.15 + yaw_penalty * 0.25) - coverage_penalty
     return max(0, min(100, int(round(raw))))
 
 
