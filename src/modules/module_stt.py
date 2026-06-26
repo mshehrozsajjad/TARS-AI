@@ -1191,6 +1191,12 @@ class STTManager:
 
         transcript = transcribe_streaming(self)
         print(f"[DEBUG] Deepgram returned: {transcript!r}", flush=True)
+
+        # Clear LISTENING indicator — deepgram handles its own recording
+        # loop in module_deepgram.py and doesn't use _get_progress_bar()
+        _, clear_bar = self._get_progress_bar()
+        clear_bar()
+
         if not transcript:
             return None
         return self._emit_result(transcript)

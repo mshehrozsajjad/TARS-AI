@@ -65,11 +65,11 @@ class BatteryModule:
         self.voltage_history = deque(maxlen=30)
         self.charging_state = "DISCHARGING"
         self.last_printed_state = None
-        # Dual EMA for charging detection:
-        # Fast EMA reacts in ~5 seconds, slow EMA reacts in ~60 seconds.
-        # When fast > slow + threshold → charging. When they converge → not charging.
+        # Dual EMA for fast charger plug/unplug detection
         self._ema_fast = None       # alpha=0.10, ~10 samples to settle
         self._ema_slow = None       # alpha=0.01, ~100 samples to settle
+        # Percentage trend for slow/boot-while-charging detection
+        self._pct_trend = deque(maxlen=240)  # 2 minutes at 0.5s intervals
 
         self.last_servo_activity_time = 0
         self.servo_cooldown_seconds = 10
@@ -159,6 +159,7 @@ class BatteryModule:
             return
 
         self.voltage_history.append(self.voltage)
+        self._pct_trend.append(self.battery_percentage)
 
         # Initialize both EMAs from first reading
         if self._ema_fast is None:
@@ -166,42 +167,38 @@ class BatteryModule:
             self._ema_slow = self.voltage
             return
 
-        # Update EMAs — both always track, no freezing needed.
-        # Fast EMA (alpha=0.10): settles in ~5 seconds (10 samples)
-        # Slow EMA (alpha=0.01): settles in ~50 seconds (100 samples)
+        # --- Fast path: dual EMA for sudden plug/unplug events ---
         self._ema_fast += 0.10 * (self.voltage - self._ema_fast)
         self._ema_slow += 0.01 * (self.voltage - self._ema_slow)
-
-        # Separation between fast and slow EMA in mV.
-        # When charger plugs in: fast jumps up quickly, slow lags → positive separation.
-        # When charger unplugs: fast drops quickly, slow lags → negative separation.
-        # Steady state (plugged or unplugged): both converge → separation ≈ 0.
-        # Normal noise: ±30mV raw → fast EMA filters to ±5mV → separation noise ≈ ±5mV.
         separation = (self._ema_fast - self._ema_slow) * 1000  # mV
+
+        # --- Slow path: percentage trend over time ---
+        # Compare averaged recent percentage vs older percentage.
+        # Works when voltage gap is small or TARS booted while charging.
+        pct_rising = False
+        pct_falling = False
+        if len(self._pct_trend) >= 60:  # need 30 seconds minimum
+            recent_pct = sum(list(self._pct_trend)[-20:]) / 20
+            older_pct = sum(list(self._pct_trend)[:20]) / 20
+            if recent_pct > older_pct + 0.3:
+                pct_rising = True
+            elif recent_pct < older_pct - 0.3:
+                pct_falling = True
 
         was_charging = self.charging_state == "CHARGING"
 
-        # Enter CHARGING when fast EMA is 40mV above slow EMA (charger just plugged in).
-        # Stay CHARGING while separation > 5mV (fast still above slow).
-        # Once they converge (separation < 5mV), check voltage trend via history
-        # to determine if we're at a charging plateau or discharging.
+        # Charging if EITHER fast detection or slow trend says so
         if separation > 40:
+            self.charging_state = "CHARGING"
+        elif pct_rising:
             self.charging_state = "CHARGING"
         elif was_charging and separation > 5:
             self.charging_state = "CHARGING"
-        elif was_charging and separation <= 5:
-            # EMAs converged — are we at a charging plateau or did charger unplug?
-            # Check if voltage is rising: compare recent vs older readings.
-            if len(self.voltage_history) >= 20:
-                recent = sum(list(self.voltage_history)[-5:]) / 5
-                older = sum(list(self.voltage_history)[-20:-15]) / 5
-                if recent > older + 0.005:
-                    # Voltage still trending up — still charging
-                    self.charging_state = "CHARGING"
-                else:
-                    self.charging_state = "DISCHARGING"
-            else:
-                self.charging_state = "DISCHARGING"
+        elif was_charging and pct_rising:
+            self.charging_state = "CHARGING"
+        elif was_charging and not pct_falling and len(self._pct_trend) < 60:
+            # Not enough data yet to confirm discharge — stay charging
+            self.charging_state = "CHARGING"
         elif self.current > 50:
             self.charging_state = "DISCHARGING"
         else:
