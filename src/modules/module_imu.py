@@ -17,7 +17,10 @@ The MPU6050 shares I2C bus 1 with the PCA9685 servo driver (0x40) and
 optional INA219 battery sensor (0x41). Default address: 0x68.
 """
 
+import asyncio
+import json
 import math
+import os
 import random
 import time
 import threading
@@ -88,98 +91,39 @@ FREEFALL_COUNT        = 3       # consecutive readings needed
 # Knocked over — sustained posture change
 KNOCKOVER_HOLD_TIME   = 2.0     # seconds in on_side before triggering
 
-# ── Fallback Lines ───────────────────────────────────────────────────────────
+# ── Reactions JSON ───────────────────────────────────────────────────────────
+# Loaded from character/<name>/imu_reactions.json at init.
+# User maintains this file. Audio is cached on first play (same TTS cache
+# as wake word responses), so subsequent plays are instant.
 
-_FALLBACK_LINES = {
-    "picked_up": [
-        "Oh. We're doing this now.",
-        "I was comfortable down there.",
-        "Hello there.",
-        "Careful with me.",
-    ],
-    "set_down": [
-        "Back to solid ground.",
-        "Thank you for putting me down.",
-        "Ah, stability. I missed that.",
-        "Good. I prefer being stationary.",
-    ],
-    "knocked_over": [
-        "I appear to have fallen over.",
-        "This is not my preferred orientation.",
-        "I'd appreciate being upright again.",
-        "Well, this is undignified.",
-    ],
-    "shaking": [
-        "I'd appreciate it if you stopped that.",
-        "That's not helping anyone.",
-        "My sensors are getting dizzy.",
-        "Okay, okay. I get the point.",
-    ],
-    "freefall": [
-        "Oh no.",
-        "This is not ideal.",
-        "Gravity. Right.",
-        "Falling.",
-    ],
-}
-
-# ── Event Descriptions (for LLM prompt) ─────────────────────────────────────
-
-_EVENT_DESCRIPTIONS = {
-    "picked_up": "Someone just picked you up off the surface you were resting on.",
-    "set_down": "Someone just set you back down on a surface after holding you.",
-    "knocked_over": "You've been knocked over or tipped onto your side.",
-    "shaking": "Someone is shaking you.",
-    "freefall": "You're in freefall — someone dropped you or you fell.",
-}
+_reactions = {}
 
 
-def _generate_reaction_line(event_name, config):
-    """Generate a context-aware reaction line using the LLM.
-
-    Falls back to hardcoded templates if the LLM is unavailable.
-    Same pattern as drives._generate_proactive_line().
-    """
-    # Build compact situation context
-    body_state = ""
-    try:
-        from modules.module_body_state import get_body_state_manager
-        bsm = get_body_state_manager()
-        if bsm is not None:
-            body_state = bsm.get_compact_prompt()
-    except Exception:
-        pass
+def _load_reactions(config):
+    """Load IMU reaction lines from the character's imu_reactions.json."""
+    global _reactions
+    char_name = config.get('CHAR', {}).get('character_name', 'TARS')
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    json_path = os.path.join(base_dir, "character", char_name, "imu_reactions.json")
 
     try:
-        from modules.module_llm import get_completion_simple
-        char_name = config.get('CHAR', {}).get('character_name', 'TARS')
-
-        prompt = (
-            f"You are {char_name}. {_EVENT_DESCRIPTIONS.get(event_name, '')}\n"
-            f"Current situation: {body_state or 'no context available'}\n\n"
-            f"React with a dramatic and emotional reaction, "
-            f"in-character, and fitting the situation. "
-            f"Don't explain yourself. Just react. "
-            f"Reply with ONLY the sentence, nothing else."
-        )
-
-        queue_message(f"IMU: Generating LLM reaction for {event_name}...")
-        line = get_completion_simple(prompt)
-        queue_message(f"IMU: LLM returned: {line!r}")
-        if line and line.strip():
-            line = line.strip().strip('"\'').strip('*').strip()
-            if line and len(line) < 200:
-                return line
-            else:
-                queue_message(f"IMU: LLM line too long ({len(line)} chars), using fallback")
-        else:
-            queue_message("IMU: LLM returned empty, using fallback")
+        with open(json_path, "r") as f:
+            _reactions = json.load(f)
+        queue_message(f"LOAD: IMU reactions loaded ({sum(len(v) for v in _reactions.values())} lines)")
+    except FileNotFoundError:
+        queue_message(f"WARNING: IMU reactions file not found: {json_path}")
+        _reactions = {}
     except Exception as e:
-        queue_message(f"IMU: LLM generation failed: {e}, using fallback")
+        queue_message(f"WARNING: Failed to load IMU reactions: {e}")
+        _reactions = {}
 
-    # Fallback to hardcoded templates
-    fallback = _FALLBACK_LINES.get(event_name, _FALLBACK_LINES["knocked_over"])
-    return random.choice(fallback)
+
+def _pick_reaction(event_name):
+    """Pick a random reaction line for an event type."""
+    lines = _reactions.get(event_name, [])
+    if not lines:
+        return None
+    return random.choice(lines)
 
 
 # ── Manager ──────────────────────────────────────────────────────────────────
@@ -205,6 +149,9 @@ class IMUManager:
         drives_cfg = config.get("DRIVES", {})
         self._quiet_start = int(drives_cfg.get("quiet_start", 23))
         self._quiet_end = int(drives_cfg.get("quiet_end", 7))
+
+        # Load reaction lines from character JSON
+        _load_reactions(config)
 
         self._bus = None
         self._sensor_ok = False
@@ -478,9 +425,11 @@ class IMUManager:
             return self._quiet_start <= hour < self._quiet_end
 
     def _speak_reaction(self, event_name):
-        """Generate and speak a verbal reaction to a physical event.
+        """Pick a random reaction line and play with cached TTS.
 
-        Runs on a background thread. Same pattern as drives._maybe_speak().
+        Runs on a background thread. Audio is cached on first play
+        (same MD5-hash cache as wake word responses), so subsequent
+        plays of the same line are instant — no TTS API call needed.
         """
         if self._is_quiet_hours():
             return
@@ -494,17 +443,24 @@ class IMUManager:
         except Exception:
             pass
 
-        line = _generate_reaction_line(event_name, self._config)
+        line = _pick_reaction(event_name)
+        if not line:
+            return
+
         queue_message(f"IMU: Reaction ({event_name}) — \"{line}\"")
 
-        # Push to UI display (same as drives proactive speech)
+        # Push to UI display
         if self._ui_manager:
             char_name = self._config.get('CHAR', {}).get('character_name', 'TARS')
             self._ui_manager.update_data(char_name, line, char_name)
 
+        # Play with caching enabled (is_wakeword=True) — same pattern
+        # as wake_word_callback in module_main.py
         try:
-            from modules.module_router import send
-            send(line)
+            from modules.module_tts import play_audio_chunks
+            from modules.module_config import load_config
+            config = load_config()
+            asyncio.run(play_audio_chunks(line, config['TTS']['ttsoption'], True))
         except Exception as e:
             queue_message(f"WARNING: IMU reaction speech failed: {e}")
 
