@@ -469,6 +469,7 @@ class IMUManager:
         consecutive_errors = 0
         max_consecutive_errors = 10
         last_event_check = 0
+        last_i2c_error = 0  # suppress events after I2C glitches
 
         while self._running:
             try:
@@ -495,15 +496,19 @@ class IMUManager:
                 self._tilt_window.append(tilt)
 
                 # Check events at lower frequency (every ~200ms)
+                # Suppress for 2s after I2C errors — first readings after
+                # recovery can be corrupted (false gyro spikes)
                 now = time.monotonic()
                 if now - last_event_check > self.EVENT_CHECK_INTERVAL:
                     last_event_check = now
-                    self._detect_events()
+                    if now - last_i2c_error > 2.0:
+                        self._detect_events()
 
                 consecutive_errors = 0
 
             except OSError as e:
                 consecutive_errors += 1
+                last_i2c_error = time.monotonic()
                 if consecutive_errors == 1:
                     queue_message(f"WARNING: IMU I2C error: {e}")
                 if consecutive_errors >= max_consecutive_errors:
