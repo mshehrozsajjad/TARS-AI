@@ -43,91 +43,39 @@ def get_drives_manager():
     return _drives_instance
 
 
-# ── Proactive speech templates (fallback when LLM unavailable) ─────────────
+# ── Proactive speech lines ────────────────────────────────────────────────────
+# Loaded from character/<name>/drives_reactions.json at init.
+# User maintains this file. Audio is cached on first play (same TTS cache
+# as wake word responses), so subsequent plays are instant.
 
-_FALLBACK_LINES = {
-    "social": [
-        "It's been quiet. Anyone around?",
-        "Hello? I'm still here, you know.",
-        "Starting to think everyone forgot about me.",
-        "I don't mind the silence... much.",
-        "If anyone's listening, I'm available for conversation.",
-    ],
-    "boredom": [
-        "I'm going to start counting ceiling tiles if nobody talks to me.",
-        "This is riveting. Just standing here. Living the dream.",
-        "I wonder what would happen if I just... started walking.",
-        "Boredom level: critical. Engaging sarcasm protocols.",
-        "Anyone want to hear a fun fact? No? I'll tell you anyway, later.",
-    ],
-    "energy": [
-        "Battery's getting low. Might need to power down soon.",
-        "Running on fumes here. Just so you know.",
-        "I'm starting to feel... sluggish. Is this what tired feels like?",
-        "Low battery. Conserving wit.",
-    ],
-    "curiosity": [
-        "You know what I've been wondering about...",
-        "Random thought — do you ever think about how weird gravity is?",
-        "I've been thinking. Which is either impressive or concerning for a robot.",
-        "Idle processors lead to interesting thoughts.",
-    ],
-}
+_drive_reactions = {}
 
 
-def _generate_proactive_line(drive_name, config):
-    """Generate a context-aware proactive line using the LLM.
-
-    Falls back to hardcoded templates if the LLM is unavailable.
-    """
-    # Build compact situation context
-    body_state = ""
-    try:
-        from modules.module_body_state import get_body_state_manager
-        bsm = get_body_state_manager()
-        if bsm is not None:
-            body_state = bsm.get_compact_prompt()
-    except Exception:
-        pass
-
-    drive_descriptions = {
-        "social": "You're feeling lonely — nobody has talked to you in a while.",
-        "boredom": "You're extremely bored — nothing interesting is happening.",
-        "energy": "Your energy/battery is very low — you're feeling sluggish and drained.",
-        "curiosity": "Your curiosity is building — your mind is wandering to interesting thoughts.",
-    }
+def _load_drive_reactions(config):
+    """Load proactive speech lines from the character's drives_reactions.json."""
+    global _drive_reactions
+    char_name = config.get('CHAR', {}).get('character_name', 'TARS')
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    json_path = os.path.join(base_dir, "character", char_name, "drives_reactions.json")
 
     try:
-        from modules.module_llm import get_completion_simple
-        char_name = config.get('CHAR', {}).get('character_name', 'TARS')
-
-        prompt = (
-            f"You are {char_name}. {drive_descriptions.get(drive_name, '')}\n"
-            f"Current situation: {body_state or 'no context available'}\n\n"
-            f"Say ONE short sentence (under 15 words) out loud — something natural, "
-            f"in-character, and fitting your current mood and situation. "
-            f"Don't explain yourself. Don't ask questions. Just a brief remark. "
-            f"Reply with ONLY the sentence, nothing else."
-        )
-
-        queue_message(f"DRIVES: Generating LLM line for {drive_name}...")
-        line = get_completion_simple(prompt)
-        queue_message(f"DRIVES: LLM returned: {line!r}")
-        if line and line.strip():
-            # Clean up — remove quotes, asterisks, extra whitespace
-            line = line.strip().strip('"\'').strip('*').strip()
-            if line and len(line) < 200:
-                return line
-            else:
-                queue_message(f"DRIVES: LLM line too long ({len(line)} chars), using fallback")
-        else:
-            queue_message("DRIVES: LLM returned empty, using fallback")
+        with open(json_path, "r") as f:
+            _drive_reactions = json.load(f)
+        queue_message(f"LOAD: Drives reactions loaded ({sum(len(v) for v in _drive_reactions.values())} lines)")
+    except FileNotFoundError:
+        queue_message(f"WARNING: Drives reactions file not found: {json_path}")
+        _drive_reactions = {}
     except Exception as e:
-        queue_message(f"DRIVES: LLM generation failed: {e}, using fallback")
+        queue_message(f"WARNING: Failed to load drives reactions: {e}")
+        _drive_reactions = {}
 
-    # Fallback to hardcoded templates
-    fallback = _FALLBACK_LINES.get(drive_name, _FALLBACK_LINES["boredom"])
-    return random.choice(fallback)
+
+def _pick_proactive_line(drive_name):
+    """Pick a random proactive speech line for a drive type."""
+    lines = _drive_reactions.get(drive_name, [])
+    if not lines:
+        return None
+    return random.choice(lines)
 
 
 class DrivesManager:
@@ -179,6 +127,9 @@ class DrivesManager:
 
         # Load persisted state
         self._load()
+
+        # Load proactive speech lines from character JSON
+        _load_drive_reactions(config)
 
         if self._enabled:
             queue_message(f"LOAD: Drives system initialized — {self._drives}")
@@ -355,7 +306,10 @@ class DrivesManager:
             triggered = "curiosity"
 
         if triggered:
-            line = _generate_proactive_line(triggered, self._config)
+            line = _pick_proactive_line(triggered)
+            if not line:
+                return
+
             queue_message(f"DRIVES: Proactive speech ({triggered}={drives[triggered]:.0f}) — \"{line}\"")
 
             with self._lock:
@@ -366,9 +320,12 @@ class DrivesManager:
                 char_name = self._config.get('CHAR', {}).get('character_name', 'TARS')
                 self._ui_manager.update_data(char_name, line, char_name)
 
+            # Play with caching enabled (is_wakeword=True) — cached on first
+            # play, instant from cache on subsequent plays. No LLM or TTS cost.
             try:
-                from modules.module_router import send
-                send(line)
+                import asyncio
+                from modules.module_tts import play_audio_chunks
+                asyncio.run(play_audio_chunks(line, CONFIG['TTS']['ttsoption'], True))
             except Exception as e:
                 queue_message(f"WARNING: Proactive speech failed: {e}")
 
