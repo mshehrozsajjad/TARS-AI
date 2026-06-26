@@ -314,6 +314,12 @@ class IMUManager:
             return
 
         now = time.time()
+
+        # Need enough readings for reliable detection (window refills
+        # after I2C error flush — ~0.5s at 50Hz = 25 readings)
+        if len(self._mag_window) < 10:
+            return
+
         mag_var = self._mag_variance()
         in_transition = self._in_transition(now)
 
@@ -321,6 +327,10 @@ class IMUManager:
             posture = self._posture
             gyro_total = self._reading["gyro_total"]
             magnitude = self._reading["magnitude"]
+
+        # Average gyro over window — filters I2C bus noise spikes.
+        # A single corrupted reading won't move the average much.
+        avg_gyro = sum(self._gyro_window) / len(self._gyro_window)
 
         # ── Freefall (highest priority — always checked) ─────────────
         freefall_count = sum(1 for m in list(self._mag_window)[-5:]
@@ -332,11 +342,12 @@ class IMUManager:
         # ── State machine transitions ────────────────────────────────
 
         if self._physical_state == "resting":
-            # Detect pickup: magnitude variance spikes OR gyro spikes
-            # Gyro reacts instantly (>15°/s vs ~3°/s at rest), magnitude
-            # variance needs time to build in the sliding window
+            # Detect pickup: sustained instability across the window.
+            # Uses average gyro (not single reading) to filter I2C noise.
+            # A real pickup produces avg_gyro > 15°/s over 0.5s window.
+            # I2C bus noise might spike one reading but avg stays ~3-5°/s.
             picked_up = (mag_var > UNSTABLE_MAG_VARIANCE
-                         or gyro_total > PICKUP_GYRO_THRESHOLD)
+                         or avg_gyro > PICKUP_GYRO_THRESHOLD)
             if picked_up:
                 self._physical_state = "held"
                 self._state_entered_at = now
