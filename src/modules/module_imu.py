@@ -219,7 +219,7 @@ class IMUManager:
             time.sleep(0.1)
 
             # Test read
-            self._read_raw_accel()
+            self._burst_read()
             self._sensor_ok = True
             queue_message(f"LOAD: MPU6050 initialized at 0x{self._address:02X}")
 
@@ -230,28 +230,53 @@ class IMUManager:
 
     # ── Raw I2C reads ────────────────────────────────────────────────────
 
-    def _read_signed_16(self, reg):
-        """Read signed 16-bit big-endian value from two registers."""
-        high = self._bus.read_byte_data(self._address, reg)
-        low = self._bus.read_byte_data(self._address, reg + 1)
-        value = (high << 8) | low
-        if value >= 0x8000:
-            value -= 0x10000
-        return value
+    def _burst_read(self):
+        """Read all sensor data in a single I2C transaction.
 
-    def _read_raw_accel(self):
-        """Read accelerometer X, Y, Z in g."""
-        ax = self._read_signed_16(REG_ACCEL_XOUT_H) / ACCEL_SCALE
-        ay = self._read_signed_16(REG_ACCEL_XOUT_H + 2) / ACCEL_SCALE
-        az = self._read_signed_16(REG_ACCEL_XOUT_H + 4) / ACCEL_SCALE
-        return ax, ay, az
+        The MPU6050 registers 0x3B–0x48 are contiguous:
+          0x3B-0x40: accel X, Y, Z (6 bytes)
+          0x41-0x42: temperature (2 bytes, skipped)
+          0x43-0x48: gyro X, Y, Z (6 bytes)
 
-    def _read_raw_gyro(self):
-        """Read gyroscope X, Y, Z in °/s."""
-        gx = self._read_signed_16(REG_GYRO_XOUT_H) / GYRO_SCALE
-        gy = self._read_signed_16(REG_GYRO_XOUT_H + 2) / GYRO_SCALE
-        gz = self._read_signed_16(REG_GYRO_XOUT_H + 4) / GYRO_SCALE
-        return gx, gy, gz
+        A single burst read (14 bytes) eliminates the race condition
+        where individual byte reads can be corrupted by I2C bus
+        contention from the PCA9685 servo driver sharing the bus.
+
+        Returns (ax, ay, az, gx, gy, gz) in g and °/s, or None if
+        the reading is physically impossible (corrupted by bus noise).
+        """
+        data = self._bus.read_i2c_block_data(self._address, REG_ACCEL_XOUT_H, 14)
+
+        # Parse signed 16-bit big-endian values
+        raw_ax = (data[0] << 8 | data[1])
+        raw_ay = (data[2] << 8 | data[3])
+        raw_az = (data[4] << 8 | data[5])
+        # data[6:8] = temperature, skip
+        raw_gx = (data[8] << 8 | data[9])
+        raw_gy = (data[10] << 8 | data[11])
+        raw_gz = (data[12] << 8 | data[13])
+
+        # Convert to signed
+        for_sign = [raw_ax, raw_ay, raw_az, raw_gx, raw_gy, raw_gz]
+        signed = [(v - 0x10000) if v >= 0x8000 else v for v in for_sign]
+
+        ax = signed[0] / ACCEL_SCALE
+        ay = signed[1] / ACCEL_SCALE
+        az = signed[2] / ACCEL_SCALE
+        gx = signed[3] / GYRO_SCALE
+        gy = signed[4] / GYRO_SCALE
+        gz = signed[5] / GYRO_SCALE
+
+        # Sanity check — discard physically impossible readings.
+        # At ±2g range, accel per axis can't exceed ~2g.
+        # At ±250°/s range, gyro per axis can't exceed ~250°/s.
+        # Values near the register max (±2g or ±250°/s) suggest corruption.
+        mag = math.sqrt(ax * ax + ay * ay + az * az)
+        gyro_total = math.sqrt(gx * gx + gy * gy + gz * gz)
+        if mag > 4.0 or gyro_total > 500.0:
+            return None  # corrupted read
+
+        return ax, ay, az, gx, gy, gz
 
     # ── Derived values ───────────────────────────────────────────────────
 
@@ -484,8 +509,12 @@ class IMUManager:
 
         while self._running:
             try:
-                ax, ay, az = self._read_raw_accel()
-                gx, gy, gz = self._read_raw_gyro()
+                result = self._burst_read()
+                if result is None:
+                    # Corrupted read (failed sanity check) — skip this cycle
+                    time.sleep(self.POLL_INTERVAL)
+                    continue
+                ax, ay, az, gx, gy, gz = result
 
                 tilt, magnitude = self._compute_tilt(ax, ay, az)
                 posture = self._classify_posture(tilt)

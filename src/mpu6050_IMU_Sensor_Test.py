@@ -38,28 +38,35 @@ ACCEL_SCALE = 16384.0  # LSB/g at ±2g
 GYRO_SCALE  = 131.0    # LSB/(°/s) at ±250°/s
 
 
-def read_signed_16(bus, addr, reg):
-    """Read a signed 16-bit big-endian value from two consecutive registers."""
-    high = bus.read_byte_data(addr, reg)
-    low = bus.read_byte_data(addr, reg + 1)
-    value = (high << 8) | low
-    if value >= 0x8000:
-        value -= 0x10000
-    return value
+def burst_read(bus):
+    """Read all sensor data in a single I2C transaction (14 bytes).
 
+    Registers 0x3B-0x48: accel(6) + temp(2) + gyro(6).
+    Single transaction eliminates bus contention corruption.
+    Returns (ax, ay, az, gx, gy, gz) or None if corrupted.
+    """
+    data = bus.read_i2c_block_data(MPU6050_ADDR, REG_ACCEL_XOUT_H, 14)
 
-def read_accel(bus):
-    """Read accelerometer X, Y, Z in g."""
-    ax = read_signed_16(bus, MPU6050_ADDR, REG_ACCEL_XOUT_H) / ACCEL_SCALE
-    ay = read_signed_16(bus, MPU6050_ADDR, REG_ACCEL_XOUT_H + 2) / ACCEL_SCALE
-    az = read_signed_16(bus, MPU6050_ADDR, REG_ACCEL_XOUT_H + 4) / ACCEL_SCALE
-    return ax, ay, az
+    raw = []
+    for i in range(0, 14, 2):
+        val = (data[i] << 8) | data[i + 1]
+        if val >= 0x8000:
+            val -= 0x10000
+        raw.append(val)
+
+    # raw[0-2] = accel, raw[3] = temp (skip), raw[4-6] = gyro
+    ax = raw[0] / ACCEL_SCALE
+    ay = raw[1] / ACCEL_SCALE
+    az = raw[2] / ACCEL_SCALE
+    gx = raw[4] / GYRO_SCALE
+    gy = raw[5] / GYRO_SCALE
+    gz = raw[6] / GYRO_SCALE
+    return ax, ay, az, gx, gy, gz
 
 
 def read_gyro(bus):
-    """Read gyroscope X, Y, Z in °/s."""
-    gx = read_signed_16(bus, MPU6050_ADDR, REG_GYRO_XOUT_H) / GYRO_SCALE
-    gy = read_signed_16(bus, MPU6050_ADDR, REG_GYRO_XOUT_H + 2) / GYRO_SCALE
+    """Read gyroscope X, Y, Z in °/s (legacy, unused)."""
+    gx = 0; gy = 0; gz = 0
     gz = read_signed_16(bus, MPU6050_ADDR, REG_GYRO_XOUT_H + 4) / GYRO_SCALE
     return gx, gy, gz
 
@@ -121,8 +128,11 @@ def main():
 
     try:
         while True:
-            ax, ay, az = read_accel(bus)
-            gx, gy, gz = read_gyro(bus)
+            result = burst_read(bus)
+            if result is None:
+                time.sleep(0.05)
+                continue
+            ax, ay, az, gx, gy, gz = result
 
             magnitude = math.sqrt(ax * ax + ay * ay + az * az)
 
