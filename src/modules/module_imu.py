@@ -509,6 +509,11 @@ class IMUManager:
             except OSError as e:
                 consecutive_errors += 1
                 last_i2c_error = time.monotonic()
+                # Flush sliding windows — readings before/during the error
+                # may be corrupted and would trigger false events
+                self._mag_window.clear()
+                self._gyro_window.clear()
+                self._tilt_window.clear()
                 if consecutive_errors == 1:
                     queue_message(f"WARNING: IMU I2C error: {e}")
                 if consecutive_errors >= max_consecutive_errors:
