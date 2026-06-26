@@ -48,8 +48,8 @@ def print_step_table(steps, step_scores):
     """Print a formatted table of steps with their stability scores."""
     print()
     print(f"  {'Step':>4}  {'LH':>3} {'RH':>3} {'LS':>3} {'RS':>3} {'Spd':>4}  "
-          f"{'MaxTilt':>8} {'Wobble':>7} {'MaxGyro':>8}  Status")
-    print("  " + "-" * 72)
+          f"{'MaxTilt':>8} {'Wobble':>7} {'Yaw':>7}  Status")
+    print("  " + "-" * 68)
 
     for i, step in enumerate(steps):
         lh, rh, ls, rs, speed = step
@@ -58,20 +58,22 @@ def print_step_table(steps, step_scores):
         if score and score["readings"] > 0:
             mt = score["max_tilt"]
             wb = score["wobble"]
-            mg = score["max_gyro"]
+            yaw = score.get("avg_yaw", 0)
 
             if mt > 20:
-                status = "!! WORST"
-            elif mt > 12:
+                status = "!! tilt"
+            elif abs(yaw) > 10:
+                status = "!! drift"
+            elif mt > 12 or abs(yaw) > 5:
                 status = "!  bad"
             else:
                 status = "   ok"
 
             print(f"  {i + 1:>4}  {lh:>3} {rh:>3} {ls:>3} {rs:>3} {speed:>4.1f}  "
-                  f"{mt:>7.1f}° {wb:>6.1f}° {mg:>7.1f}°/s  {status}")
+                  f"{mt:>7.1f}° {wb:>6.1f}° {yaw:>+6.1f}°/s  {status}")
         else:
             print(f"  {i + 1:>4}  {lh:>3} {rh:>3} {ls:>3} {rs:>3} {speed:>4.1f}  "
-                  f"{'--':>8} {'--':>7} {'--':>8}  no data")
+                  f"{'--':>8} {'--':>7} {'--':>7}  no data")
 
 
 def print_comparison(old_steps, old_scores, new_steps, new_scores, step_idx):

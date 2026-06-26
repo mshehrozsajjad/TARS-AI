@@ -242,6 +242,7 @@ class IMURecorder:
                     "t": time.monotonic(),
                     "tilt": reading["tilt"],
                     "gyro": reading["gyro_total"],
+                    "gx": reading.get("gx", 0.0),  # yaw rate (rotation around vertical)
                     "ax": reading["ax"],
                     "ay": reading["ay"],
                     "az": reading["az"],
@@ -323,6 +324,7 @@ def score_per_step(recordings, step_markers):
             "max_gyro": float,     # peak rotation rate (degrees/s)
             "avg_gyro": float,     # average rotation rate
             "wobble": float,       # tilt standard deviation (instability)
+            "avg_yaw": float,      # average yaw rate (degrees/s, + = turning one way)
             "readings": int,       # number of IMU samples in this window
         }
     """
@@ -343,14 +345,17 @@ def score_per_step(recordings, step_markers):
         if not window:
             results.append({
                 "step": step_idx, "max_tilt": 0, "avg_tilt": 0,
-                "max_gyro": 0, "avg_gyro": 0, "wobble": 0, "readings": 0,
+                "max_gyro": 0, "avg_gyro": 0, "wobble": 0,
+                "avg_yaw": 0, "readings": 0,
             })
             continue
 
         tilts = [r["tilt"] for r in window]
         gyros = [r["gyro"] for r in window]
+        yaws = [r.get("gx", 0.0) for r in window]
         avg_tilt = sum(tilts) / len(tilts)
         avg_gyro = sum(gyros) / len(gyros)
+        avg_yaw = sum(yaws) / len(yaws)
 
         # Wobble = standard deviation of tilt (how much it's rocking)
         if len(tilts) > 1:
@@ -366,6 +371,7 @@ def score_per_step(recordings, step_markers):
             "max_gyro": max(gyros),
             "avg_gyro": round(avg_gyro, 2),
             "wobble": round(wobble, 2),
+            "avg_yaw": round(avg_yaw, 2),
             "readings": len(window),
         })
 
@@ -375,7 +381,8 @@ def score_per_step(recordings, step_markers):
 def score_movement(step_scores):
     """Compute an overall stability score (0-100) from per-step scores.
 
-    100 = perfectly stable.  Penalizes high tilt, high gyro, and wobble.
+    100 = perfectly stable.  Penalizes high tilt, high gyro, wobble,
+    and yaw drift (turning instead of going straight).
     """
     if not step_scores:
         return 0
@@ -383,6 +390,10 @@ def score_movement(step_scores):
     max_tilt = max(s["max_tilt"] for s in step_scores)
     avg_wobble = sum(s["wobble"] for s in step_scores) / len(step_scores)
     avg_gyro = sum(s["avg_gyro"] for s in step_scores) / len(step_scores)
+
+    # Yaw drift: average yaw rate across all steps (consistent turning = bad)
+    # abs() because turning left or right is equally bad for "walk straight"
+    avg_yaw = abs(sum(s.get("avg_yaw", 0) for s in step_scores) / len(step_scores))
 
     # Tilt penalty: 0 at 0°, 100 at 45°+
     tilt_penalty = min(100, (max_tilt / 45.0) * 100)
@@ -393,8 +404,12 @@ def score_movement(step_scores):
     # Gyro penalty: 0 at 0°/s, 100 at 100°/s+
     gyro_penalty = min(100, (avg_gyro / 100.0) * 100)
 
-    # Weighted combination
-    raw = 100 - (tilt_penalty * 0.5 + wobble_penalty * 0.3 + gyro_penalty * 0.2)
+    # Yaw penalty: 0 at 0°/s, 100 at 20°/s+ sustained turning
+    yaw_penalty = min(100, (avg_yaw / 20.0) * 100)
+
+    # Weighted combination — yaw gets meaningful weight
+    raw = 100 - (tilt_penalty * 0.4 + wobble_penalty * 0.2
+                 + gyro_penalty * 0.15 + yaw_penalty * 0.25)
     return max(0, min(100, int(round(raw))))
 
 
@@ -458,6 +473,7 @@ def profile_movement(steps, num_runs=3, reset_pause=2.0):
             "max_gyro": round(sum(s["max_gyro"] for s in scores_for_step) / len(scores_for_step), 1),
             "avg_gyro": round(sum(s["avg_gyro"] for s in scores_for_step) / len(scores_for_step), 1),
             "wobble": round(sum(s["wobble"] for s in scores_for_step) / len(scores_for_step), 1),
+            "avg_yaw": round(sum(s.get("avg_yaw", 0) for s in scores_for_step) / len(scores_for_step), 1),
             "readings": sum(s["readings"] for s in scores_for_step) // len(scores_for_step),
         })
 
@@ -531,12 +547,45 @@ def generate_variations(steps, step_index):
     _make("height ±10",
           _toward_50(lh, 10), _toward_50(rh, 10), ls, rs, speed)
 
+    # ── Asymmetric swing variations (for drift/yaw correction) ───────
+    # If both legs swing identically but one side pushes harder
+    # mechanically, TARS drifts.  These try left/right swing imbalances
+    # to compensate.
+    BIAS = 3
+    if ls == rs:
+        # Symmetric swings — try biasing each direction
+        _make(f"swing L+{BIAS} R-{BIAS}",
+              lh, rh, ls + BIAS, rs - BIAS, speed)
+        _make(f"swing L-{BIAS} R+{BIAS}",
+              lh, rh, ls - BIAS, rs + BIAS, speed)
+    else:
+        # Already asymmetric — try widening and narrowing the gap
+        _make("swing gap +3",
+              lh, rh, ls + BIAS, rs - BIAS, speed)
+        _make("swing gap -3",
+              lh, rh, ls - BIAS, rs + BIAS, speed)
+
+    # Asymmetric height (one leg slightly higher for mechanical imbalance)
+    _make(f"height L+3 R-3",
+          min(99, lh + 3), max(1, rh - 3), ls, rs, speed)
+    _make(f"height L-3 R+3",
+          max(1, lh - 3), min(99, rh + 3), ls, rs, speed)
+
     return variations
 
 
 def find_worst_steps(step_scores, threshold=10.0):
-    """Return indices of steps with max_tilt above threshold, sorted worst first."""
-    bad = [(s["step"], s["max_tilt"]) for s in step_scores
-           if s["max_tilt"] > threshold]
+    """Return indices of steps with max_tilt or yaw drift above threshold.
+
+    Sorted by a combined badness score (tilt + yaw), worst first.
+    """
+    bad = []
+    for s in step_scores:
+        tilt = s["max_tilt"]
+        yaw = abs(s.get("avg_yaw", 0))
+        # A step is "bad" if it has high tilt OR significant yaw drift
+        badness = tilt + yaw * 0.5
+        if tilt > threshold or yaw > 10:
+            bad.append((s["step"], badness))
     bad.sort(key=lambda x: x[1], reverse=True)
     return [idx for idx, _ in bad]
