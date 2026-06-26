@@ -367,13 +367,16 @@ class IMUManager:
         # ── State machine transitions ────────────────────────────────
 
         if self._physical_state == "resting":
-            # Detect pickup: sustained instability across the window.
-            # Uses average gyro (not single reading) to filter I2C noise.
-            # A real pickup produces avg_gyro > 15°/s over 0.5s window.
-            # I2C bus noise might spike one reading but avg stays ~3-5°/s.
-            picked_up = (mag_var > UNSTABLE_MAG_VARIANCE
-                         or avg_gyro > PICKUP_GYRO_THRESHOLD)
-            if picked_up:
+            # Detect pickup: instability + tilt change from surface level.
+            # Sliding on a table produces gyro/mag spikes but tilt stays
+            # at ~4-5° (surface level). Picking up always tilts TARS (>8°)
+            # because a hand can't lift perfectly vertically.
+            with self._lock:
+                tilt = self._reading["tilt"]
+            has_motion = (mag_var > UNSTABLE_MAG_VARIANCE
+                          or avg_gyro > PICKUP_GYRO_THRESHOLD)
+            off_surface = tilt > SURFACE_TILT_THRESHOLD
+            if has_motion and off_surface:
                 self._physical_state = "held"
                 self._state_entered_at = now
                 self._fire_event("picked_up", now)
