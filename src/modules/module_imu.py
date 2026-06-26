@@ -431,11 +431,6 @@ class IMUManager:
         (same MD5-hash cache as wake word responses), so subsequent
         plays of the same line are instant — no TTS API call needed.
         """
-        if self._is_quiet_hours():
-            queue_message(f"IMU: Suppressed reaction ({event_name}) — quiet hours active")
-            if self._ui_manager:
-                self._ui_manager.update_data("IMU", f"[Quiet hours] {event_name}", "SYSTEM")
-            return
 
         # Don't speak if TARS is already talking or thinking
         try:

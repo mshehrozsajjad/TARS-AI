@@ -235,6 +235,11 @@ class UIManagerLite(threading.Thread):
             _last_batt_charging = False
             _batt_surface = None
 
+            # Quiet hours indicator
+            _quiet_start = int(CONFIG.get('DRIVES', {}).get('quiet_start', 23))
+            _quiet_end = int(CONFIG.get('DRIVES', {}).get('quiet_end', 7))
+            _quiet_surface = font.render("\u263E", True, (120, 120, 180))  # ☾ moon
+
             while self.running and not self.shutdown_event.is_set():
                 if ss_mgr:
                     if ss_mgr.is_active():
@@ -352,6 +357,18 @@ class UIManagerLite(threading.Thread):
                             bx = logical_width - _batt_surface.get_width() - padding
                             by = bar_y + (bar_h - _batt_surface.get_height()) // 2
                             composed.blit(_batt_surface, (bx, by))
+
+                    # Quiet hours indicator (left side of status bar, moon symbol)
+                    from datetime import datetime as _dt
+                    _hour = _dt.now().hour
+                    if _quiet_start > _quiet_end:
+                        _is_quiet = _hour >= _quiet_start or _hour < _quiet_end
+                    else:
+                        _is_quiet = _quiet_start <= _hour < _quiet_end
+                    if _is_quiet:
+                        qx = padding
+                        qy = bar_y + (bar_h - _quiet_surface.get_height()) // 2
+                        composed.blit(_quiet_surface, (qx, qy))
 
                     prev_state = state
 
