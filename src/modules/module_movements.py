@@ -24,6 +24,32 @@ move_arm = servoctl.move_arm
 disable_all_servos = servoctl.disable_all_servos
 HOLD = servoctl.HOLD
 
+
+# ── Tuned movement parameters ───────────────────────────────────────────────
+# If a movement has been optimized via app-movement-tuner.py, use those
+# parameters instead of the hardcoded defaults.  Zero runtime overhead —
+# just reads a JSON file once at startup.
+
+def _run_tuned(movement_name):
+    """Try to run a movement from tuned parameters.
+
+    Returns True if tuned params existed and the movement was executed,
+    False if no tuned params (caller should run the hardcoded fallback).
+    """
+    try:
+        from modules.module_movement_tuner import load_tuned_params
+        steps = load_tuned_params(movement_name)
+    except Exception:
+        return False
+
+    if steps is None:
+        return False
+
+    for step in steps:
+        move_legs(step[0], step[1], step[2], step[3], step[4])
+
+    return True
+
 _swap_directions = False
 
 def set_swap_turn_directions(swap: bool):
@@ -43,14 +69,15 @@ def step_forward():
         try:
 
             if not servoctl.ARMS_PRESENT:
-                move_legs(50, 50, 50, 50, 0.9)
-                move_legs(42, 42, 40, 40, 0.9)
-                move_legs(70, 70, 23, 23, 0.9)
-                move_legs(30, 30, 30, 30, 0.8)
-                move_legs(70, 70, 35, 35, 0.9)
-                move_legs(60, 60, 50, 50, 0.9)
-                move_legs(50, 50, 50, 50, 0.9)
-            
+                if not _run_tuned("step_forward"):
+                    move_legs(50, 50, 50, 50, 0.9)
+                    move_legs(42, 42, 40, 40, 0.9)
+                    move_legs(70, 70, 23, 23, 0.9)
+                    move_legs(30, 30, 30, 30, 0.8)
+                    move_legs(70, 70, 35, 35, 0.9)
+                    move_legs(60, 60, 50, 50, 0.9)
+                    move_legs(50, 50, 50, 50, 0.9)
+
 
             if servoctl.ARMS_PRESENT:
                 move_legs(50, 50, 50, 50, 0.9)
@@ -75,23 +102,24 @@ def walk_forward():
         try:
 
             if not servoctl.ARMS_PRESENT:
-                move_legs(50, 50, 50, 50, 0.8)
-                sequence = [
-                    (40, 70, 50, 50),
-                    (40, 70, 35, 50),
-                    (50, 50, 35, 50),
-                    (70, 40, 50, 50),
-                    (70, 40, 50, 35),
-                    (50, 50, 50, 35),
-                ]
-                for _ in range(2):
-                    for a, b, c, d in sequence:
+                if not _run_tuned("walk_forward"):
+                    move_legs(50, 50, 50, 50, 0.8)
+                    sequence = [
+                        (40, 70, 50, 50),
+                        (40, 70, 35, 50),
+                        (50, 50, 35, 50),
+                        (70, 40, 50, 50),
+                        (70, 40, 50, 35),
+                        (50, 50, 50, 35),
+                    ]
+                    for _ in range(2):
+                        for a, b, c, d in sequence:
+                            move_legs(a, b, c, d, 0.5)
+                    for a, b, c, d in sequence[:3]:
                         move_legs(a, b, c, d, 0.5)
-                for a, b, c, d in sequence[:3]:
-                    move_legs(a, b, c, d, 0.5)
-                move_legs(70, 40, 35, 50, 0.5)
-                move_legs(70, 40, 50, 50, 0.5)
-                move_legs(50, 50, 50, 50, 0.8)
+                    move_legs(70, 40, 35, 50, 0.5)
+                    move_legs(70, 40, 50, 50, 0.5)
+                    move_legs(50, 50, 50, 50, 0.8)
 
             if servoctl.ARMS_PRESENT:
                 move_legs(50, 50, 50, 50, 0.8)
@@ -127,13 +155,14 @@ def step_backward():
         try:
 
             if not servoctl.ARMS_PRESENT:
-                move_legs(50, 50, 50, 50, 0.9)
-                move_legs(30, 30, 55, 55, 0.8)
-                move_legs(68, 68, 82, 82, 0.8)
-                move_legs(30, 30, 70, 70, 0.8)
-                move_legs(50, 50, 62, 62, 0.9)
-                move_legs(65, 65, 50, 50, 0.9)
-                move_legs(50, 50, 50, 50, 0.9)
+                if not _run_tuned("step_backward"):
+                    move_legs(50, 50, 50, 50, 0.9)
+                    move_legs(30, 30, 55, 55, 0.8)
+                    move_legs(68, 68, 82, 82, 0.8)
+                    move_legs(30, 30, 70, 70, 0.8)
+                    move_legs(50, 50, 62, 62, 0.9)
+                    move_legs(65, 65, 50, 50, 0.9)
+                    move_legs(50, 50, 50, 50, 0.9)
 
             
             if servoctl.ARMS_PRESENT:
@@ -161,23 +190,24 @@ def walk_backward():
         try:
 
             if not servoctl.ARMS_PRESENT:
-                move_legs(50, 50, 50, 50, 0.8)
-                sequence = [
-                    (50, 65, 50, 50),
-                    (50, 65, 50, 75),
-                    (50, 50, 50, 75),
-                    (65, 50, 50, 50),
-                    (65, 50, 75, 50),
-                    (50, 50, 75, 50),
-                ]
-                for _ in range(2):
-                    for a, b, c, d in sequence:
+                if not _run_tuned("walk_backward"):
+                    move_legs(50, 50, 50, 50, 0.8)
+                    sequence = [
+                        (50, 65, 50, 50),
+                        (50, 65, 50, 75),
+                        (50, 50, 50, 75),
+                        (65, 50, 50, 50),
+                        (65, 50, 75, 50),
+                        (50, 50, 75, 50),
+                    ]
+                    for _ in range(2):
+                        for a, b, c, d in sequence:
+                            move_legs(a, b, c, d, 0.5)
+                    for a, b, c, d in sequence[:3]:
                         move_legs(a, b, c, d, 0.5)
-                for a, b, c, d in sequence[:3]:
-                    move_legs(a, b, c, d, 0.5)
-                move_legs(65, 50, 50, 75, 0.5)
-                move_legs(65, 50, 50, 50, 0.5)
-                move_legs(50, 50, 50, 50, 0.8)
+                    move_legs(65, 50, 50, 75, 0.5)
+                    move_legs(65, 50, 50, 50, 0.5)
+                    move_legs(50, 50, 50, 50, 0.8)
 
             if servoctl.ARMS_PRESENT:
                 move_legs(50, 50, 50, 50, 0.8)
@@ -212,12 +242,13 @@ def _turn_right_impl():
         servoctl.MOVING = True
         servoctl._notify_movement_start()
         try:
-            move_legs(50, 50, 50, 50, 0.9)
-            move_legs(70, 70, 50, 50, 0.9)
-            move_legs(70, 70, 65, 35, 0.9)
-            move_legs(45, 45, 65, 35, 0.9)
-            move_legs(52, 52, 50, 50, 0.8)
-            move_legs(50, 50, 50, 50, 0.8)
+            if not _run_tuned("_turn_right"):
+                move_legs(50, 50, 50, 50, 0.9)
+                move_legs(70, 70, 50, 50, 0.9)
+                move_legs(70, 70, 65, 35, 0.9)
+                move_legs(45, 45, 65, 35, 0.9)
+                move_legs(52, 52, 50, 50, 0.8)
+                move_legs(50, 50, 50, 50, 0.8)
             time.sleep(0.1)
             disable_all_servos()
         finally:
@@ -250,12 +281,13 @@ def _turn_left_impl():
         servoctl.MOVING = True
         servoctl._notify_movement_start()
         try:
-            move_legs(50, 50, 50, 50, 0.9)
-            move_legs(70, 70, 50, 50, 0.9)
-            move_legs(70, 70, 35, 65, 0.9)
-            move_legs(45, 45, 35, 65, 0.9)
-            move_legs(52, 52, 50, 50, 0.8)
-            move_legs(50, 50, 50, 50, 0.8)
+            if not _run_tuned("_turn_left"):
+                move_legs(50, 50, 50, 50, 0.9)
+                move_legs(70, 70, 50, 50, 0.9)
+                move_legs(70, 70, 35, 65, 0.9)
+                move_legs(45, 45, 35, 65, 0.9)
+                move_legs(52, 52, 50, 50, 0.8)
+                move_legs(50, 50, 50, 50, 0.8)
             time.sleep(0.1)
             disable_all_servos()
         finally:
