@@ -4,9 +4,18 @@ app-imu-calibrate.py
 
 IMU-based self-calibration tool for TARS-AI.
 
-Uses the MPU6050 accelerometer to automatically level TARS by iteratively
-adjusting leg servo positions.  Computes optimal perfectXOffset values
-for config.ini so every subsequent movement starts from a level stance.
+Uses the MPU6050 accelerometer to automatically level TARS by adjusting
+leg servo positions.  Computes optimal perfectXOffset values for config.ini
+so every subsequent movement starts from a level stance.
+
+Algorithm:
+  1. Move to neutral, read baseline tilt
+  2. Small probe move to measure sensitivity (degrees per % of servo offset)
+  3. If responsive: calculate target offset directly, apply, verify, fine-tune
+  4. If not responsive: skip axis (tilt is structural, not servo-correctable)
+
+Both legs stay on the ground at all times — max offset is clamped to ±8%
+(matching the ~20 PWM unit range of perfectXOffset in typical configs).
 
 Run on the Pi with TARS standing on a flat, level surface.
 
@@ -41,14 +50,14 @@ ACCEL_SCALE      = 16384.0   # LSB/g at ±2 g range
 # ── Calibration tuning ───────────────────────────────────────────────────────
 
 TOLERANCE       = 1.5    # degrees — considered "level enough"
-MAX_ITERATIONS  = 20     # per axis before giving up
-GAIN            = 0.5    # degrees-of-tilt → percent servo adjustment
-MIN_STEP        = 0.3    # smallest meaningful adjustment (prevents stalling)
-MAX_OFFSET      = 35.0   # max accumulated offset from 50 % (safety clamp)
+MAX_OFFSET      = 8.0    # max % offset from neutral (keeps both legs on ground)
 SETTLE_TIME     = 1.0    # seconds to wait after a servo move
 NUM_SAMPLES     = 50     # IMU readings to average per measurement
 SAMPLE_INTERVAL = 0.02   # seconds between samples (50 Hz)
-DIRECTION_PROBE = 4      # percent offset used to detect correction direction
+PROBE_OFFSET    = 3.0    # % offset for sensitivity measurement probe
+MIN_SENSITIVITY = 0.1    # deg/% — below this, axis is not servo-correctable
+REFINE_ITERS    = 5      # max fine-tuning iterations after initial correction
+UNDERSHOOT      = 0.7    # multiply corrections by this to avoid overshoot
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -70,8 +79,6 @@ class IMUReader:
         self.bus.write_byte_data(address, REG_PWR_MGMT_1, 0x00)
         time.sleep(0.1)
 
-    # ── single read ──────────────────────────────────────────────────────
-
     def read_accel(self):
         """Burst-read accelerometer → (ax, ay, az) in g, or None if corrupt."""
         data = self.bus.read_i2c_block_data(self.address, REG_ACCEL_XOUT_H, 6)
@@ -81,15 +88,13 @@ class IMUReader:
 
         mag = math.sqrt(ax * ax + ay * ay + az * az)
         if mag > 4.0 or mag < 0.1:
-            return None                        # I2C bus noise / corruption
+            return None
         return ax, ay, az
-
-    # ── averaged read ────────────────────────────────────────────────────
 
     def read_averaged(self, n=NUM_SAMPLES):
         """Take *n* good readings and return their mean (ax, ay, az), or None."""
         good = []
-        for _ in range(n + 20):                # extra attempts for discards
+        for _ in range(n + 20):
             r = self.read_accel()
             if r is not None:
                 good.append(r)
@@ -137,100 +142,147 @@ def total_tilt(ax, ay, az):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Direction detection
+#  Sensitivity measurement
 # ═══════════════════════════════════════════════════════════════════════════════
 #
-# The sign mapping from "servo % change" to "tilt change" depends on IMU
-# mounting and servo wiring, which can vary between builds.  A one-shot probe
-# move determines the correct sign for each axis automatically.
+# A small probe move measures how many degrees of tilt change per 1% of
+# servo offset.  This tells us:
+#   - The correct direction (sign) for correction
+#   - Whether this axis is responsive enough to calibrate
+#   - The exact offset to apply (direct calculation, not iterative guessing)
 
-def _detect_sign(imu, axis):
-    """Return +1 or −1: how a positive servo offset maps to tilt change.
-
-    Makes a small test move, measures the response, returns to neutral.
-    """
-    base = imu.read_averaged()
-    if base is None:
-        return 1
-    base_roll, base_pitch = compute_roll_pitch(*base)
-    baseline = base_roll if axis == "roll" else base_pitch
-
-    # Probe move
+def _apply_offset(axis, offset):
+    """Move servos to the given offset from neutral.  Both legs stay near 50%."""
     if axis == "roll":
-        servoctl.move_legs(50 - DIRECTION_PROBE, 50 + DIRECTION_PROBE,
-                           None, None, 0.5)
+        lh = max(1.0, min(99.0, 50.0 - offset))
+        rh = max(1.0, min(99.0, 50.0 + offset))
+        servoctl.move_legs(lh, rh, None, None, 0.4)
     else:
-        servoctl.move_legs(None, None,
-                           50 - DIRECTION_PROBE, 50 - DIRECTION_PROBE, 0.5)
+        ls = max(1.0, min(99.0, 50.0 - offset))
+        rs = max(1.0, min(99.0, 50.0 - offset))
+        servoctl.move_legs(None, None, ls, rs, 0.4)
+
+
+def _read_axis(imu, axis):
+    """Read IMU and return the relevant axis value in degrees, or None."""
+    r = imu.read_averaged()
+    if r is None:
+        return None
+    roll, pitch = compute_roll_pitch(*r)
+    return roll if axis == "roll" else pitch
+
+
+def _measure_sensitivity(imu, axis):
+    """Probe to measure sensitivity and correction direction.
+
+    Returns (sign, sensitivity_deg_per_pct):
+        sign: +1 if positive offset reduces tilt, -1 if negative offset does
+        sensitivity: absolute degrees of tilt change per 1% of offset
+        Returns (0, 0.0) if IMU reads fail.
+    """
+    # Read baseline at neutral
+    baseline = _read_axis(imu, axis)
+    if baseline is None:
+        return 0, 0.0
+
+    # Probe: apply a small positive offset
+    _apply_offset(axis, PROBE_OFFSET)
     time.sleep(SETTLE_TIME)
 
-    probe = imu.read_averaged()
+    probed = _read_axis(imu, axis)
 
     # Return to neutral
-    servoctl.move_legs(50, 50, 50, 50, 0.5)
+    _apply_offset(axis, 0)
     time.sleep(SETTLE_TIME)
 
-    if probe is None:
-        return 1
-    probe_roll, probe_pitch = compute_roll_pitch(*probe)
-    probed = probe_roll if axis == "roll" else probe_pitch
+    if probed is None:
+        return 0, 0.0
 
-    # If the probe reduced the absolute error, the sign is correct (+1)
-    return 1 if abs(probed) < abs(baseline) else -1
+    delta_tilt = probed - baseline            # how tilt changed
+    sensitivity = abs(delta_tilt) / PROBE_OFFSET  # deg per %
+
+    # If positive offset reduced the absolute tilt, sign is +1
+    sign = 1 if abs(probed) < abs(baseline) else -1
+
+    return sign, sensitivity
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Correction loop (proportional controller with oscillation damping)
+#  Correction — measure, calculate, apply, refine
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _correct_axis(imu, axis, sign):
-    """Iteratively zero out one tilt axis.  Returns the final offset (%)."""
-    label = "roll" if axis == "roll" else "pitch"
-    offset = 0.0
-    prev_error = None
-    gain = GAIN
+def _correct_axis(imu, axis):
+    """Level one axis.  Returns the final offset (%) or 0 if not possible.
 
-    for i in range(MAX_ITERATIONS):
-        r = imu.read_averaged()
-        if r is None:
-            print(f"  #{i + 1:2d}  IMU read failed, retrying...")
+    Steps:
+      1. Measure sensitivity with a probe move
+      2. Calculate the target offset directly from tilt / sensitivity
+      3. Apply (clamped to MAX_OFFSET so legs stay on ground)
+      4. Fine-tune with a few small iterations
+    """
+    label = "Roll" if axis == "roll" else "Pitch"
+
+    # ── Step 1: measure sensitivity ──────────────────────────────────────
+    print(f"       Measuring sensitivity...")
+    sign, sensitivity = _measure_sensitivity(imu, axis)
+
+    if sensitivity < MIN_SENSITIVITY:
+        print(f"       Sensitivity = {sensitivity:.3f} deg/% (below {MIN_SENSITIVITY})")
+        print(f"       {label} is not servo-correctable — skipping")
+        return 0.0
+
+    print(f"       Sensitivity = {sensitivity:.2f} deg/%")
+    print(f"       Direction:    {'positive' if sign == 1 else 'negative'} offset reduces tilt")
+
+    # ── Step 2: read current error and calculate target ──────────────────
+    error = _read_axis(imu, axis)
+    if error is None:
+        print(f"       IMU read failed")
+        return 0.0
+
+    target_offset = (-error / sensitivity) * sign * UNDERSHOOT
+    target_offset = max(-MAX_OFFSET, min(MAX_OFFSET, target_offset))
+
+    print(f"       Current {label.lower()} = {error:+.2f} deg")
+    print(f"       Target offset = {target_offset:+.1f}%")
+    print()
+
+    # ── Step 3: apply and verify ─────────────────────────────────────────
+    _apply_offset(axis, target_offset)
+    time.sleep(SETTLE_TIME)
+
+    offset = target_offset
+
+    # ── Step 4: fine-tune ────────────────────────────────────────────────
+    for i in range(REFINE_ITERS):
+        error = _read_axis(imu, axis)
+        if error is None:
+            print(f"  #{i + 1}  IMU read failed, skipping")
             time.sleep(0.5)
             continue
 
-        roll, pitch = compute_roll_pitch(*r)
-        error = roll if axis == "roll" else pitch
-
-        print(f"  #{i + 1:2d}  {label} = {error:+6.2f} deg   offset = {offset:+5.1f}%")
+        print(f"  #{i + 1}  {label.lower()} = {error:+6.2f} deg   offset = {offset:+5.1f}%")
 
         if abs(error) < TOLERANCE:
             print(f"       Level (within {TOLERANCE} deg)")
             break
 
-        # Dampen gain if the error flips sign (oscillating)
-        if prev_error is not None and error * prev_error < 0:
-            gain *= 0.6
+        # Would the correction push us past MAX_OFFSET?
+        correction = (-error / sensitivity) * sign * UNDERSHOOT
+        new_offset = offset + correction
+        if abs(new_offset) > MAX_OFFSET:
+            clamped = max(-MAX_OFFSET, min(MAX_OFFSET, new_offset))
+            print(f"       Clamped to {clamped:+.1f}% (max ±{MAX_OFFSET}%)")
+            if abs(clamped - offset) < 0.1:
+                print(f"       At limit — best achievable with servos")
+                break
+            new_offset = clamped
 
-        adj = error * gain * sign
-        if 0 < abs(adj) < MIN_STEP:
-            adj = MIN_STEP if adj > 0 else -MIN_STEP
-
-        offset += adj
-        offset = max(-MAX_OFFSET, min(MAX_OFFSET, offset))
-
-        # Apply to servos
-        if axis == "roll":
-            lh = max(1.0, min(99.0, 50.0 - offset))
-            rh = max(1.0, min(99.0, 50.0 + offset))
-            servoctl.move_legs(lh, rh, None, None, 0.4)
-        else:
-            ls = max(1.0, min(99.0, 50.0 - offset))
-            rs = max(1.0, min(99.0, 50.0 - offset))
-            servoctl.move_legs(None, None, ls, rs, 0.4)
-
+        offset = new_offset
+        _apply_offset(axis, offset)
         time.sleep(SETTLE_TIME)
-        prev_error = error
     else:
-        print("       Max iterations reached")
+        print(f"       Fine-tuning done ({REFINE_ITERS} iterations)")
 
     return offset
 
@@ -244,7 +296,7 @@ def _compute_config_offsets(height_offset, swing_offset):
 
     The servo controller applies offsets as:
         leftUpHeight     = base + perfectLeftHeightOffset
-        rightUpHeight    = base − perfectRightHeightOffset
+        rightUpHeight    = base - perfectRightHeightOffset
         forwardLeftLeg   = base + perfectLeftLegOffset
         forwardRightLeg  = base + perfectRightLegOffset
 
@@ -396,43 +448,23 @@ def main():
         print()
         return
 
-    # ── Detect correction directions ─────────────────────────────────────
+    # ── Correct each axis ────────────────────────────────────────────────
 
     print()
-    print("[4/6] Detecting correction directions...")
-
-    roll_sign  = 1
-    pitch_sign = 1
-
-    if needs_roll:
-        roll_sign = _detect_sign(imu, "roll")
-        direction = "standard" if roll_sign == 1 else "inverted"
-        print(f"       Roll  correction: {direction}")
-
-    if needs_pitch:
-        pitch_sign = _detect_sign(imu, "pitch")
-        direction = "standard" if pitch_sign == 1 else "inverted"
-        print(f"       Pitch correction: {direction}")
-
-    # ── Correction loops ─────────────────────────────────────────────────
-
-    print()
-    print("[5/6] Correcting...")
+    print("[4/6] Correcting roll (leg heights)..." if needs_roll else
+          "[4/6] Roll within tolerance, skipping")
 
     height_offset = 0.0
-    swing_offset  = 0.0
-
     if needs_roll:
-        print()
-        print("  Roll correction (adjusting leg heights)")
-        print("  " + "-" * 46)
-        height_offset = _correct_axis(imu, "roll", roll_sign)
+        height_offset = _correct_axis(imu, "roll")
 
+    print()
+    print("[5/6] Correcting pitch (leg swing)..." if needs_pitch else
+          "[5/6] Pitch within tolerance, skipping")
+
+    swing_offset = 0.0
     if needs_pitch:
-        print()
-        print("  Pitch correction (adjusting leg swing)")
-        print("  " + "-" * 46)
-        swing_offset = _correct_axis(imu, "pitch", pitch_sign)
+        swing_offset = _correct_axis(imu, "pitch")
 
     # ── Final measurement ────────────────────────────────────────────────
 
