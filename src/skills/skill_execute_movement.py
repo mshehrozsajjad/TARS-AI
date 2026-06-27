@@ -12,7 +12,7 @@ SKILL = {
      * Gestures: "dance", "bow", "laugh", "pose", "wave", "do something fun"
      * Expressions: "you're excited", "wiggle"
    Valid movements (can be combined in sequence):
-     * "forward" - walk forward one step
+     * "forward" - walk forward, covers good distance (use for "walk forward", "come here", "move forward", "take a step")
      * "backward" - walk backward one step
      * "left" - turn left
      * "right" - turn right
@@ -51,7 +51,7 @@ def _execute_movement(movements):
 
     try:
         from modules.module_movements import (
-            step_forward, walk_backward,
+            walk_forward, walk_backward,
             turn_right_slow, turn_left_slow,
             laugh, excited, swing_legs,
             pose, bow,
@@ -64,7 +64,7 @@ def _execute_movement(movements):
         return
 
     action_map = {
-        "forward": step_forward,
+        "forward": walk_forward,
         "backward": walk_backward,
         "left": turn_left_slow,
         "right": turn_right_slow,

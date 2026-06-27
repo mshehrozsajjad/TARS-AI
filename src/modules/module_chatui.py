@@ -1376,7 +1376,7 @@ def robot_move():
     try:
         # Fast movements
         if direction == 'forward':
-            step_forward()
+            walk_forward()
         elif direction == 'backward':
             step_backward()
         elif direction == 'left':
