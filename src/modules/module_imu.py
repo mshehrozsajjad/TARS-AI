@@ -84,12 +84,21 @@ SETDOWN_SETTLE_TIME    = 3.0    # seconds of sustained stillness required
 SHAKE_GYRO_THRESHOLD  = 80.0    # °/s total rotation rate
 SHAKE_COUNT_THRESHOLD = 5       # readings above threshold in window
 
-# Freefall — magnitude near zero
+# Freefall — magnitude near zero. Require SUSTAINED low-g (consecutive
+# readings) so sporadic corrupted I2C reads can't fake a fall while still.
+# At rest magnitude is ~1g, so any sub-threshold reading is suspect unless
+# it persists for the whole fall. 5 readings @50Hz = 100ms of true freefall.
 FREEFALL_THRESHOLD    = 0.3     # g — below this = freefall
-FREEFALL_COUNT        = 3       # consecutive readings needed
+FREEFALL_COUNT        = 5       # CONSECUTIVE readings needed
 
 # Knocked over — sustained posture change
 KNOCKOVER_HOLD_TIME   = 2.0     # seconds in on_side before triggering
+
+# Self-movement — suppress event detection while TARS moves itself
+# (walking/gestures) and for a short settle window after, since self-motion
+# mimics being picked up / set down. The body keeps wobbling briefly after
+# the servos stop, so the settle window absorbs that.
+SELF_MOVE_SETTLE      = 2.0     # seconds after movement ends before resuming
 
 # ── Reactions JSON ───────────────────────────────────────────────────────────
 # Loaded from character/<name>/imu_reactions.json at init.
@@ -195,6 +204,10 @@ class IMUManager:
 
         # Startup grace period — don't fire events in first 3 seconds
         self._startup_time = time.time()
+
+        # Suppress detection while TARS moves itself (+ settle window after).
+        # monotonic timestamp; 0 means "not currently suppressed".
+        self._self_move_until = 0.0
 
         # Initialize hardware
         self._init_sensor()
@@ -324,6 +337,24 @@ class IMUManager:
         """True if a state change happened recently (suppress noisy events)."""
         return now - self._state_entered_at < 2.0
 
+    def _is_self_moving(self):
+        """True while TARS executes its own movement, plus a settle window
+        afterward. Self-motion (walking, gestures) produces gyro spikes and
+        tilt changes that mimic being handled, so detection is suppressed
+        both during the movement and for SELF_MOVE_SETTLE seconds after it
+        ends (the body keeps wobbling once the servos stop)."""
+        try:
+            import modules.module_servoctl as servoctl
+            moving = servoctl.MOVING
+        except Exception:
+            moving = False
+
+        now = time.monotonic()
+        if moving:
+            self._self_move_until = now + SELF_MOVE_SETTLE
+            return True
+        return now < self._self_move_until
+
     def _detect_events(self):
         """State machine for physical event detection.
 
@@ -358,9 +389,17 @@ class IMUManager:
         avg_gyro = sum(self._gyro_window) / len(self._gyro_window)
 
         # ── Freefall (highest priority — always checked) ─────────────
-        freefall_count = sum(1 for m in list(self._mag_window)[-5:]
-                            if m < FREEFALL_THRESHOLD)
-        if freefall_count >= FREEFALL_COUNT:
+        # Count CONSECUTIVE trailing readings below threshold. A real fall
+        # holds near-0g for its whole duration; isolated or clustered
+        # corrupted I2C reads do not produce a long unbroken run, so this
+        # rejects the false freefall that fired while TARS was sitting still.
+        consecutive_low = 0
+        for m in reversed(self._mag_window):
+            if m < FREEFALL_THRESHOLD:
+                consecutive_low += 1
+            else:
+                break
+        if consecutive_low >= FREEFALL_COUNT:
             self._fire_event("freefall", now)
             return
 
@@ -533,19 +572,30 @@ class IMUManager:
                     }
                     self._posture = posture
 
-                # Update sliding windows
-                self._mag_window.append(magnitude)
-                self._gyro_window.append(gyro_total)
-                self._tilt_window.append(tilt)
+                # While TARS moves itself (walking/gestures) and during the
+                # brief settle afterward, skip the detection windows entirely.
+                # Self-motion mimics being picked up / set down, and the body
+                # keeps wobbling after the servos stop. Clearing the windows
+                # means detection resumes from clean resting data instead of
+                # stale during-movement values.
+                if self._is_self_moving():
+                    self._mag_window.clear()
+                    self._gyro_window.clear()
+                    self._tilt_window.clear()
+                else:
+                    # Update sliding windows
+                    self._mag_window.append(magnitude)
+                    self._gyro_window.append(gyro_total)
+                    self._tilt_window.append(tilt)
 
-                # Check events at lower frequency (every ~200ms)
-                # Suppress for 2s after I2C errors — first readings after
-                # recovery can be corrupted (false gyro spikes)
-                now = time.monotonic()
-                if now - last_event_check > self.EVENT_CHECK_INTERVAL:
-                    last_event_check = now
-                    if now - last_i2c_error > 2.0:
-                        self._detect_events()
+                    # Check events at lower frequency (every ~200ms)
+                    # Suppress for 2s after I2C errors — first readings after
+                    # recovery can be corrupted (false gyro spikes)
+                    now = time.monotonic()
+                    if now - last_event_check > self.EVENT_CHECK_INTERVAL:
+                        last_event_check = now
+                        if now - last_i2c_error > 2.0:
+                            self._detect_events()
 
                 consecutive_errors = 0
 
