@@ -113,7 +113,19 @@ class UIManagerLite(threading.Thread):
             self._dirty.set()
 
     def silence(self, progress=0):
-        new = "LISTENING" if progress > 0 else ""
+        if progress > 0:
+            new = "LISTENING"
+        else:
+            # Don't clear LISTENING if the state machine says we're
+            # still listening — the progress bar shouldn't override
+            # the actual TarsState. Only clear during STANDBY.
+            try:
+                from modules.module_state import get_tars_state, TarsState
+                if get_tars_state() == TarsState.LISTENING:
+                    return
+            except Exception:
+                pass
+            new = ""
         if self._state != new:
             self._state = new
             if new:
