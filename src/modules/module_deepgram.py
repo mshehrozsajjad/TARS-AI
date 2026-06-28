@@ -26,8 +26,13 @@ _client = None
 _pending_ctx = None        # context manager for the pre-opened connection
 _pending_conn = None       # the pre-opened connection object
 _pending_listener = None   # listener thread for the pre-opened connection
+_pending_created = 0       # monotonic timestamp when connection was opened
 _pending_lock = threading.Lock()
 _pending_ready = threading.Event()
+
+# Deepgram closes idle WebSockets after ~30-60s server-side.
+# Discard pre-opened connections older than this to avoid silent failures.
+_MAX_CONN_AGE = 25  # seconds — safely under Deepgram's server timeout
 
 # Per-utterance mutable state — written by listener thread, read by main
 _transcript = None
@@ -136,7 +141,7 @@ def _create_connection():
 
 def _preconnect():
     """Open a connection in the background so it's ready for the next utterance."""
-    global _pending_ctx, _pending_conn, _pending_listener
+    global _pending_ctx, _pending_conn, _pending_listener, _pending_created
     with _pending_lock:
         if _pending_conn is not None:
             return  # Already have one ready
@@ -145,20 +150,32 @@ def _preconnect():
         ctx, conn, listener = result
         with _pending_lock:
             _pending_ctx, _pending_conn, _pending_listener = ctx, conn, listener
+            _pending_created = time.monotonic()
             _pending_ready.set()
 
 
 def _take_connection():
-    """Take the pre-opened connection, or create a new one if none ready."""
-    global _pending_ctx, _pending_conn, _pending_listener
+    """Take the pre-opened connection, or create a new one if none ready.
+
+    Discards stale connections (older than _MAX_CONN_AGE seconds) since
+    Deepgram closes idle WebSockets server-side after ~30-60s.
+    """
+    global _pending_ctx, _pending_conn, _pending_listener, _pending_created
     with _pending_lock:
         if _pending_conn is not None:
+            age = time.monotonic() - _pending_created
             ctx, conn, listener = _pending_ctx, _pending_conn, _pending_listener
             _pending_ctx = _pending_conn = _pending_listener = None
             _pending_ready.clear()
-            return ctx, conn, listener
 
-    # No pre-opened connection — create one now
+            if age > _MAX_CONN_AGE:
+                # Connection is stale — close it and create a fresh one
+                print(f"[DEEPGRAM] Discarding stale pre-opened connection ({age:.0f}s old)", flush=True)
+                threading.Thread(target=_close_connection, args=(ctx,), daemon=True).start()
+            else:
+                return ctx, conn, listener
+
+    # No usable pre-opened connection — create one now
     result = _create_connection()
     if result:
         return result
