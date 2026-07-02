@@ -44,6 +44,11 @@ from modules.module_config import load_config
 from modules.module_messageQue import queue_message
 from modules.module_state import set_tars_state, on_state_change, TarsState
 from modules.module_tts import init_audio_output, play_audio_chunks, stop_tts_playback
+# Import servoctl before gestures to fully resolve the servoctl <-> movements
+# circular import (matches app.py's load order via module_main). Importing
+# gestures first would load movements while servoctl is only partially
+# initialized, raising "cannot import name 'step_forward'".
+from modules.module_servoctl import initialize_servos
 from modules.module_gestures import execute_gesture_async, GESTURE_NAMES
 
 # === Load Configuration ===
@@ -278,7 +283,6 @@ def main():
 
     if gestures_enabled:
         try:
-            from modules.module_servoctl import initialize_servos
             initialize_servos()
             queue_message("LOAD: Servos initialized for narration gestures")
         except Exception as e:
