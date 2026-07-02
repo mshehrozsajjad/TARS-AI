@@ -18,6 +18,8 @@ Usage:
     python app_narrate.py countdown=5           # 5 second countdown before each take
     python app_narrate.py gestures=off          # ignore [gesture] tags, speak only
     python app_narrate.py show_ui=false         # headless (no DSI screen output)
+    python app_narrate.py port=5555             # take commands over the network
+                                                #   (connect with: nc <pi-ip> 5555)
 
 See NARRATE.md for the full option list, REPL commands, and gesture reference.
 """
@@ -61,6 +63,8 @@ TTS_OPTION = CONFIG['TTS']['ttsoption']
 countdown_seconds = 3
 gestures_enabled = True
 show_ui = True
+control_port = 0          # 0 = local stdin REPL; >0 = TCP control server
+control_host = "0.0.0.0"  # bind address when control_port is set
 
 for arg in sys.argv[1:]:
     if "=" in arg:
@@ -76,6 +80,17 @@ for arg in sys.argv[1:]:
             gestures_enabled = value in ("1", "true", "yes", "on")
         elif key == "show_ui":
             show_ui = value in ("1", "true", "yes", "on")
+        elif key == "port":
+            try:
+                control_port = max(0, int(value))
+            except ValueError:
+                pass
+        elif key == "host":
+            control_host = value
+
+# === Shared state for the last spoken take (used by :replay) ===
+last_text = None
+last_gestures = []
 
 
 # === UI Manager (replicate app.py selection: lite on this Pi) ===
@@ -145,17 +160,18 @@ def parse_line(line):
 
 
 # === Speaking ===
-def run_countdown(seconds):
+def run_countdown(seconds, emit):
     if seconds <= 0:
         return
-    print()
+    emit("")
     for remaining in range(seconds, 0, -1):
-        print(f"  Recording in {remaining}...", flush=True)
+        emit(f"  Recording in {remaining}...")
         time.sleep(1)
-    print("  >>> SPEAKING <<<\n", flush=True)
+    emit("  >>> SPEAKING <<<")
+    emit("")
 
 
-def speak_line(text, gestures):
+def speak_line(text, gestures, emit):
     """Display the line on the UI, fire gestures, and speak it aloud (blocking)."""
     if ui_manager:
         ui_manager.deactivate_screensaver()
@@ -177,7 +193,7 @@ def speak_line(text, gestures):
         set_tars_state(TarsState.STANDBY)
 
 
-# === REPL ===
+# === Command handling (shared by local REPL and TCP control server) ===
 HELP_TEXT = """
 TARS Narration Mode — commands:
   <text>            Speak a line (after countdown). Use [gesture] tags inline.
@@ -186,90 +202,164 @@ TARS Narration Mode — commands:
   :gest on|off      Toggle gesture playback.
   :ui               Show current settings.
   :help             Show this help.
-  :q / :quit        Exit narration mode.
+  :q / :quit        Exit narration mode (stops the app + display).
 
 Available gestures: {gestures}
 """.strip()
 
 
-def print_help():
-    print(HELP_TEXT.format(gestures=", ".join(GESTURE_NAMES)))
+def _stdout_emit(msg=""):
+    print(msg, flush=True)
 
 
-def repl():
-    global countdown_seconds, gestures_enabled
-    last_text = None
-    last_gestures = []
+def banner(emit):
+    emit("")
+    emit("=" * 52)
+    emit("  TARS NARRATION MODE")
+    emit(f"  TTS backend : {TTS_OPTION}")
+    emit(f"  Countdown   : {countdown_seconds}s")
+    emit(f"  Gestures    : {'on' if gestures_enabled else 'off'}")
+    emit(f"  UI          : {'on' if ui_manager else 'off'}")
+    emit("  Type :help for commands, :q to quit.")
+    emit("=" * 52)
+    emit("")
 
-    print("\n" + "=" * 52)
-    print("  TARS NARRATION MODE")
-    print(f"  TTS backend : {TTS_OPTION}")
-    print(f"  Countdown   : {countdown_seconds}s")
-    print(f"  Gestures    : {'on' if gestures_enabled else 'off'}")
-    print(f"  UI          : {'on' if ui_manager else 'off'}")
-    print("  Type :help for commands, :q to quit.")
-    print("=" * 52 + "\n")
 
+def process_command(raw, emit):
+    """Handle one input line. Returns 'quit' to end the session, else 'continue'."""
+    global countdown_seconds, gestures_enabled, last_text, last_gestures
+
+    line = raw.strip()
+    if not line:
+        return "continue"
+
+    # --- Commands ---
+    if line in (":q", ":quit", ":exit"):
+        emit("Exiting narration mode.")
+        return "quit"
+    if line in (":help", ":h", ":?"):
+        emit(HELP_TEXT.format(gestures=", ".join(GESTURE_NAMES)))
+        return "continue"
+    if line == ":ui":
+        emit(f"  countdown={countdown_seconds}s  gestures="
+             f"{'on' if gestures_enabled else 'off'}  "
+             f"ui={'on' if ui_manager else 'off'}  tts={TTS_OPTION}")
+        return "continue"
+    if line == ":replay":
+        if last_text is None:
+            emit("  Nothing to replay yet.")
+            return "continue"
+        run_countdown(countdown_seconds, emit)
+        speak_line(last_text, last_gestures, emit)
+        return "continue"
+    if line.startswith(":countdown"):
+        parts = line.split()
+        if len(parts) == 2 and parts[1].isdigit():
+            countdown_seconds = int(parts[1])
+            emit(f"  Countdown set to {countdown_seconds}s.")
+        else:
+            emit("  Usage: :countdown N")
+        return "continue"
+    if line.startswith(":gest"):
+        parts = line.split()
+        if len(parts) == 2 and parts[1].lower() in ("on", "off"):
+            gestures_enabled = parts[1].lower() == "on"
+            emit(f"  Gestures {'enabled' if gestures_enabled else 'disabled'}.")
+        else:
+            emit("  Usage: :gest on|off")
+        return "continue"
+    if line.startswith(":"):
+        emit(f"  Unknown command: {line}  (try :help)")
+        return "continue"
+
+    # --- Script line ---
+    text, gestures = parse_line(line)
+    if not text:
+        emit("  (line had no speakable text after removing tags)")
+        return "continue"
+    if gestures:
+        emit(f"  gestures: {', '.join(gestures)}")
+    run_countdown(countdown_seconds, emit)
+    last_text, last_gestures = text, gestures
+    speak_line(text, gestures, emit)
+    return "continue"
+
+
+def repl_stdin():
+    """Local terminal REPL (used when no control port is set)."""
+    banner(_stdout_emit)
     while True:
         try:
             raw = input("script> ")
         except (EOFError, KeyboardInterrupt):
             print("\nExiting narration mode.")
             break
-
-        line = raw.strip()
-        if not line:
-            continue
-
-        # --- Commands ---
-        if line in (":q", ":quit", ":exit"):
-            print("Exiting narration mode.")
+        if process_command(raw, _stdout_emit) == "quit":
             break
-        if line in (":help", ":h", ":?"):
-            print_help()
-            continue
-        if line == ":ui":
-            print(f"  countdown={countdown_seconds}s  gestures="
-                  f"{'on' if gestures_enabled else 'off'}  "
-                  f"ui={'on' if ui_manager else 'off'}  tts={TTS_OPTION}")
-            continue
-        if line == ":replay":
-            if last_text is None:
-                print("  Nothing to replay yet.")
-                continue
-            run_countdown(countdown_seconds)
-            speak_line(last_text, last_gestures)
-            continue
-        if line.startswith(":countdown"):
-            parts = line.split()
-            if len(parts) == 2 and parts[1].isdigit():
-                countdown_seconds = int(parts[1])
-                print(f"  Countdown set to {countdown_seconds}s.")
-            else:
-                print("  Usage: :countdown N")
-            continue
-        if line.startswith(":gest"):
-            parts = line.split()
-            if len(parts) == 2 and parts[1].lower() in ("on", "off"):
-                gestures_enabled = parts[1].lower() == "on"
-                print(f"  Gestures {'enabled' if gestures_enabled else 'disabled'}.")
-            else:
-                print("  Usage: :gest on|off")
-            continue
-        if line.startswith(":"):
-            print(f"  Unknown command: {line}  (try :help)")
-            continue
 
-        # --- Script line ---
-        text, gestures = parse_line(line)
-        if not text:
-            print("  (line had no speakable text after removing tags)")
-            continue
-        if gestures:
-            print(f"  gestures: {', '.join(gestures)}")
-        run_countdown(countdown_seconds)
-        last_text, last_gestures = text, gestures
-        speak_line(text, gestures)
+
+def serve_control(host, port, shutdown_event):
+    """TCP control server so commands can be sent from another machine/terminal.
+
+    One client is served at a time — the robot is a single physical device, so
+    takes must be serialized anyway. Connect from anywhere on the LAN with:
+        nc <pi-ip> <port>
+    A local status line is still printed to the launching terminal via
+    queue_message, but no input is read from it.
+    """
+    import socket
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind((host, port))
+    srv.listen(1)
+    queue_message(f"LOAD: Narration control server listening on {host}:{port}")
+    print(f"\nRemote control ready. From another terminal run:\n"
+          f"    nc <pi-ip> {port}\n", flush=True)
+
+    while not shutdown_event.is_set():
+        try:
+            conn, addr = srv.accept()
+        except OSError:
+            break
+        queue_message(f"INFO: Narration client connected from {addr[0]}")
+        rfile = conn.makefile("r", encoding="utf-8")
+        wfile = conn.makefile("w", encoding="utf-8")
+
+        def emit(msg=""):
+            try:
+                wfile.write(msg + "\n")
+                wfile.flush()
+            except (BrokenPipeError, ValueError, OSError):
+                pass
+
+        quit_requested = False
+        try:
+            banner(emit)
+            emit("script> ")
+            for raw in rfile:
+                if process_command(raw, emit) == "quit":
+                    quit_requested = True
+                    break
+                emit("script> ")
+        except (ConnectionError, OSError):
+            pass
+        finally:
+            for f in (rfile, wfile):
+                try:
+                    f.close()
+                except Exception:
+                    pass
+            try:
+                conn.close()
+            except Exception:
+                pass
+            queue_message("INFO: Narration client disconnected")
+
+        if quit_requested:
+            break
+
+    srv.close()
 
 
 # === Main ===
@@ -291,7 +381,10 @@ def main():
     set_tars_state(TarsState.STANDBY)
 
     try:
-        repl()
+        if control_port > 0:
+            serve_control(control_host, control_port, shutdown_event)
+        else:
+            repl_stdin()
     finally:
         stop_tts_playback()
         set_tars_state(TarsState.STANDBY)
