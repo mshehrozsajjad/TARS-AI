@@ -147,6 +147,7 @@ cython_debug/
 
 # Notes
 *.md
+!src/NARRATE.md
 
 # LLM and Vision Files
 llm/

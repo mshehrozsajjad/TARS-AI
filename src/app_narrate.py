@@ -20,6 +20,8 @@ Usage:
     python app_narrate.py show_ui=false         # headless (no DSI screen output)
     python app_narrate.py port=5555             # take commands over the network
                                                 #   (connect with: nc <pi-ip> 5555)
+    python app_narrate.py model=inherit         # use config.ini's ElevenLabs model
+                                                #   (default is eleven_v3 for emotion tags)
 
 See NARRATE.md for the full option list, REPL commands, and gesture reference.
 """
@@ -65,6 +67,11 @@ gestures_enabled = True
 show_ui = True
 control_port = 0          # 0 = local stdin REPL; >0 = TCP control server
 control_host = "0.0.0.0"  # bind address when control_port is set
+# Narration defaults to ElevenLabs v3 so inline emotion audio tags ([excited],
+# [whispers], [sarcastic], ...) work. Pass model=inherit to use config.ini's
+# model instead, or model=<id> to force a specific one. Only applied when the
+# active TTS backend is elevenlabs.
+tts_model = "eleven_v3"
 
 for arg in sys.argv[1:]:
     if "=" in arg:
@@ -87,6 +94,15 @@ for arg in sys.argv[1:]:
                 pass
         elif key == "host":
             control_host = value
+        elif key == "model":
+            tts_model = value
+
+# === Apply TTS model override for this (standalone) narration process only ===
+# load_config() returns a cached singleton shared with module_elevenlabs, so
+# setting it here redirects narration's synthesis. This process is separate from
+# the main TARS app, so the running robot's configured model is untouched.
+if TTS_OPTION == "elevenlabs" and tts_model and tts_model != "inherit":
+    CONFIG['TTS']['elevenlabs_model'] = tts_model
 
 # === Shared state for the last spoken take (used by :replay) ===
 last_text = None
@@ -217,6 +233,8 @@ def banner(emit):
     emit("=" * 52)
     emit("  TARS NARRATION MODE")
     emit(f"  TTS backend : {TTS_OPTION}")
+    if TTS_OPTION == "elevenlabs":
+        emit(f"  TTS model   : {CONFIG['TTS'].get('elevenlabs_model', '?')}")
     emit(f"  Countdown   : {countdown_seconds}s")
     emit(f"  Gestures    : {'on' if gestures_enabled else 'off'}")
     emit(f"  UI          : {'on' if ui_manager else 'off'}")
