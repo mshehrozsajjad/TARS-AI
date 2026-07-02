@@ -103,7 +103,9 @@ for arg in sys.argv[1:]:
 # setting it here redirects narration's synthesis. This process is separate from
 # the main TARS app, so the running robot's configured model is untouched.
 if TTS_OPTION == "elevenlabs" and tts_model and tts_model != "inherit":
-    CONFIG['TTS']['elevenlabs_model'] = tts_model
+    # CONFIG['TTS'] is a TTSConfig dataclass (supports item-read via __getitem__
+    # but not item-assignment), so set the attribute directly.
+    setattr(CONFIG['TTS'], 'elevenlabs_model', tts_model)
 
 # === Shared state for the last spoken take (used by :replay) ===
 last_text = None
