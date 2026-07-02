@@ -82,7 +82,31 @@ Notes:
   local machine only, pass `host=127.0.0.1`.
 
 The TTS voice/backend is whatever is set in `config.ini` under `[TTS] ttsoption`
-(currently ElevenLabs). This tool does not change it.
+(currently ElevenLabs).
+
+---
+
+## Stopping it remotely (frees the screen for NoMachine)
+
+While narration runs it grabs the DSI/DRM display, so NoMachine can't attach until
+it exits. To stop it from another machine (no display needed):
+
+```bash
+# graceful — connect to the control port and quit
+nc 192.168.178.70 5555        # then type:  :q
+
+# kill it over SSH (works even while the screen is grabbed)
+ssh tars@192.168.178.70 'pkill -f app_narrate.py'
+
+# if you launched it inside tmux
+ssh tars@192.168.178.70 'tmux kill-session -t narrate'
+```
+
+`app_narrate.py` handles **SIGTERM/SIGINT** cleanly, so a plain `pkill` (or
+Ctrl-C) shuts pygame down properly and releases the display — you don't need
+`pkill -9`. If it ever wedges and `pkill` doesn't take, then fall back to
+`pkill -9 -f app_narrate.py` (the kernel frees the display on process exit
+regardless).
 
 ---
 

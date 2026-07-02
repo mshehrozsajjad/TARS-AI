@@ -31,6 +31,7 @@ import os
 import sys
 import re
 import time
+import signal
 import asyncio
 import threading
 import warnings
@@ -380,11 +381,53 @@ def serve_control(host, port, shutdown_event):
     srv.close()
 
 
+# === Shutdown / cleanup ===
+_shutdown_event = threading.Event()
+_cleaned_up = threading.Event()
+
+
+def _cleanup():
+    """Release audio, TTS and the display cleanly. Idempotent."""
+    if _cleaned_up.is_set():
+        return
+    _cleaned_up.set()
+    try:
+        stop_tts_playback()
+    except Exception:
+        pass
+    try:
+        set_tars_state(TarsState.STANDBY)
+    except Exception:
+        pass
+    _shutdown_event.set()
+    if ui_manager:
+        try:
+            ui_manager.stop()
+            # Give the UI thread a moment to hit pygame.quit() so the DSI/DRM
+            # display is released — otherwise NoMachine can't grab it.
+            ui_manager.join(timeout=2)
+        except Exception:
+            pass
+
+
+def _handle_signal(signum, frame):
+    """SIGTERM/SIGINT -> clean shutdown so `pkill` releases the display.
+
+    Without this, the default SIGTERM action kills the process without running
+    pygame.quit(), which can leave the screen grabbed/frozen for NoMachine.
+    """
+    name = signal.Signals(signum).name
+    queue_message(f"INFO: Narration received {name}, shutting down.")
+    _cleanup()
+    os._exit(0)
+
+
 # === Main ===
 def main():
-    shutdown_event = threading.Event()
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
 
-    _init_ui(shutdown_event)
+    _init_ui(_shutdown_event)
     on_state_change(_sync_state_to_ui)
 
     init_audio_output()
@@ -400,18 +443,11 @@ def main():
 
     try:
         if control_port > 0:
-            serve_control(control_host, control_port, shutdown_event)
+            serve_control(control_host, control_port, _shutdown_event)
         else:
             repl_stdin()
     finally:
-        stop_tts_playback()
-        set_tars_state(TarsState.STANDBY)
-        shutdown_event.set()
-        if ui_manager:
-            try:
-                ui_manager.stop()
-            except Exception:
-                pass
+        _cleanup()
 
 
 if __name__ == "__main__":
