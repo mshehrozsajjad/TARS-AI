@@ -1065,53 +1065,24 @@ class STTManager:
         return self._emit_result(decoded_text) if decoded_text else None
 
     def _transcribe_with_server(self):
-        """Transcribe audio by sending it to an external server."""
-        try:
-            chunks, _ = self._record_audio_chunks()
-            if chunks is None:
-                if self.DEBUG:
-                    queue_message("DEBUG STT: No speech recorded (silence timeout)")
-                return None
+        """Transcribe audio via external server using WebSocket streaming.
 
-            external_url = self.config['STT'].get('external_url', '')
-            if self.DEBUG:
-                total_samples = sum(len(c) for c in chunks)
-                queue_message(f"DEBUG STT: Sending {total_samples} samples to {external_url}/save_audio")
+        Streams mic audio to the server in real-time (like Deepgram) so
+        the server already has all audio when VAD fires — only Whisper
+        inference time remains.  Falls back to HTTP POST if WebSocket
+        connection fails.
+        """
+        from modules.module_external_ws import transcribe_streaming
 
-            wav_buf = self._chunks_to_wav_buffer(chunks, self.MODEL_RATE)
-            files = {"audio": ("audio.wav", wav_buf, "audio/wav")}
-            headers = {}
-            api_key = os.environ.get('EXTERNAL_API_KEY', '')
-            if api_key:
-                headers["Authorization"] = f"Bearer {api_key}"
-            response = requests.post(
-                f"{external_url}/save_audio",
-                files=files, headers=headers, timeout=10
-            )
-            if response.status_code != 200:
-                queue_message(f"ERROR: Server STT returned {response.status_code}: {response.text[:200]}")
-                return None
+        transcript = transcribe_streaming(self)
+        print(f"[DEBUG] External WS returned: {transcript!r}", flush=True)
 
-            transcription = response.json().get("transcription", [])
-            if not transcription:
-                if self.DEBUG:
-                    queue_message("DEBUG STT: Server returned empty transcription (VAD filtered or no speech)")
-                return None
+        _, clear_bar = self._get_progress_bar()
+        clear_bar()
 
-            raw_text = transcription[0].get("text", "").strip()
-            if self.DEBUG:
-                queue_message(f"DEBUG STT: Server transcribed: '{raw_text}'")
-            extra = {
-                "result": [
-                    {"conf": 1.0, "start": seg.get("start", 0),
-                     "end": seg.get("end", 0), "word": seg.get("text", "")}
-                    for seg in transcription
-                ]
-            }
-            return self._emit_result(raw_text, extra)
-        except requests.RequestException as e:
-            queue_message(f"ERROR: Server transcription request failed: {e}")
-        return None
+        if not transcript:
+            return None
+        return self._emit_result(transcript)
 
     def _transcribe_with_openai(self):
         """Transcribe and translate audio using OpenAI's Whisper API."""

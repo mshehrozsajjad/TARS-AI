@@ -2161,6 +2161,8 @@ async def websocket_stt(ws: WebSocket):
         return
     await ws.accept()
     audio_buffer = BytesIO()
+    sample_rate = 16000
+    language = None
     log.info("WebSocket STT: client connected")
     try:
         while True:
@@ -2169,14 +2171,48 @@ async def websocket_stt(ws: WebSocket):
                 if "bytes" in message and message["bytes"]:
                     audio_buffer.write(message["bytes"])
                 elif "text" in message and message["text"]:
-                    cmd = message["text"].strip().lower()
+                    text = message["text"].strip()
+                    # JSON config message (e.g. {"sample_rate": 16000, "language": "en"})
+                    if text.startswith("{"):
+                        try:
+                            cfg = json.loads(text)
+                            if "sample_rate" in cfg:
+                                sample_rate = int(cfg["sample_rate"])
+                            if "language" in cfg:
+                                language = cfg["language"]
+                            log.info(f"WS-STT: configured (rate={sample_rate}, lang={language})")
+                            continue
+                        except (json.JSONDecodeError, ValueError):
+                            pass
+                    cmd = text.lower()
                     if cmd == "end":
                         if audio_buffer.tell() == 0:
                             await ws.send_json({"text": "", "segments": [], "is_final": True})
                             continue
+                        # Wrap raw PCM in WAV header so faster-whisper can read it
                         audio_buffer.seek(0)
+                        raw_pcm = audio_buffer.read()
+                        wav_buf = BytesIO()
+                        with wave.open(wav_buf, "wb") as wf:
+                            wf.setnchannels(1)
+                            wf.setsampwidth(2)
+                            wf.setframerate(sample_rate)
+                            wf.writeframes(raw_pcm)
+                        wav_buf.seek(0)
                         try:
-                            transcription, info = SERVICES["stt"].transcribe(audio_buffer)
+                            has_speech = await asyncio.get_event_loop().run_in_executor(
+                                _INFERENCE_POOL, SERVICES["stt"].has_speech, wav_buf
+                            )
+                            if not has_speech:
+                                log.info("WS-STT: VAD filtered (no speech)")
+                                await ws.send_json({"text": "", "segments": [], "is_final": True})
+                                audio_buffer = BytesIO()
+                                continue
+                            wav_buf.seek(0)
+                            transcription, info = await asyncio.get_event_loop().run_in_executor(
+                                _INFERENCE_POOL,
+                                lambda: SERVICES["stt"].transcribe(wav_buf, language=language)
+                            )
                             full_text = " ".join(t["text"] for t in transcription).strip()
                             log.info(f"WS-STT: \"{full_text}\"")
                             await ws.send_json({"text": full_text, "segments": transcription,
