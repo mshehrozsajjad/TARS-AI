@@ -515,19 +515,78 @@ from concurrent.futures import ThreadPoolExecutor
 _INFERENCE_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="tars-inference")
 
 # ===================================================================
-# STT Service (faster-whisper + Silero VAD)
+# STT Service (mlx-whisper on Apple Silicon, faster-whisper elsewhere)
 # ===================================================================
+
+def _is_apple_silicon() -> bool:
+    """Detect Apple Silicon (M1/M2/M3/M4)."""
+    import platform as _platform
+    return sys.platform == "darwin" and _platform.machine() == "arm64"
+
+
+# MLX model name mapping — maps config names to HuggingFace MLX repos
+_MLX_MODEL_MAP = {
+    "large-v3":       "mlx-community/whisper-large-v3-mlx",
+    "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
+    "distil-large-v3": "mlx-community/distil-whisper-large-v3",
+    "large-v2":       "mlx-community/whisper-large-v2-mlx",
+    "medium":         "mlx-community/whisper-medium-mlx",
+    "small":          "mlx-community/whisper-small-mlx",
+    "base":           "mlx-community/whisper-base-mlx",
+    "tiny":           "mlx-community/whisper-tiny-mlx",
+}
+
+
 class STTService:
     def __init__(self, model_size: str = "large-v3", compute_type: str = "auto",
                  vad_filter: bool = True, device: str = None):
+        self.model_name = model_size
+        self._backend = None  # "mlx" or "faster-whisper"
+        self.model = None
+        self._mlx_repo = None
+
+        # Try MLX on Apple Silicon
+        if _is_apple_silicon():
+            self._try_load_mlx(model_size)
+
+        # Fall back to faster-whisper
+        if self._backend is None:
+            self._load_faster_whisper(model_size, compute_type, device)
+
+        # Silero VAD for pre-filtering
+        self._vad_model = None
+        self._vad_utils = None
+        if vad_filter:
+            self._load_vad()
+
+    def _try_load_mlx(self, model_size: str):
+        try:
+            import mlx_whisper
+            self._mlx_module = mlx_whisper
+
+            # Resolve model name to HuggingFace repo
+            self._mlx_repo = _MLX_MODEL_MAP.get(model_size, model_size)
+
+            log.info(f"Loading MLX Whisper model: {self._mlx_repo} ...")
+            # Warm up — first call downloads and compiles the model
+            import numpy as np
+            dummy = np.zeros(16000, dtype=np.float32)  # 1s silence
+            self._mlx_module.transcribe(dummy, path_or_hf_repo=self._mlx_repo, language="en")
+            self._backend = "mlx"
+            log.info(f"MLX Whisper loaded and warmed up ({self._mlx_repo})")
+        except ImportError:
+            log.info("mlx-whisper not installed, falling back to faster-whisper")
+        except Exception as e:
+            log.warning(f"MLX Whisper failed to load ({e}), falling back to faster-whisper")
+
+    def _load_faster_whisper(self, model_size: str, compute_type: str, device: str = None):
         from faster_whisper import WhisperModel
 
         device = device or DEVICE
         if compute_type == "auto":
             compute_type = "float16" if device == "cuda" else "int8"
 
-        log.info(f"Loading Whisper model: {model_size} (compute: {compute_type}, device: {device})...")
-        self.model_name = model_size
+        log.info(f"Loading faster-whisper model: {model_size} (compute: {compute_type}, device: {device})...")
         whisper_dir = MODELS_DIR / "whisper"
         whisper_dir.mkdir(exist_ok=True)
         self.model = WhisperModel(
@@ -536,13 +595,8 @@ class STTService:
             compute_type=compute_type,
             download_root=str(whisper_dir),
         )
-        log.info("Whisper model loaded.")
-
-        # Silero VAD for pre-filtering
-        self._vad_model = None
-        self._vad_utils = None
-        if vad_filter:
-            self._load_vad()
+        self._backend = "faster-whisper"
+        log.info("faster-whisper model loaded.")
 
     def _load_vad(self):
         try:
@@ -634,7 +688,44 @@ class STTService:
             audio_bytes.seek(0)
             return None
 
+    def _wav_to_float32(self, audio_bytes: BytesIO):
+        """Convert WAV BytesIO to float32 numpy array at 16kHz."""
+        import numpy as np
+        import soundfile as sf
+        audio_bytes.seek(0)
+        audio, sr = sf.read(audio_bytes, dtype="float32")
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+        if sr != 16000:
+            # Simple linear resample
+            ratio = 16000 / sr
+            new_len = int(len(audio) * ratio)
+            indices = np.linspace(0, len(audio) - 1, new_len)
+            audio = np.interp(indices, np.arange(len(audio)), audio).astype(np.float32)
+        audio_bytes.seek(0)
+        return audio
+
     def transcribe(self, audio_bytes: BytesIO, language: str = None) -> tuple[list[dict], object]:
+        if self._backend == "mlx":
+            return self._transcribe_mlx(audio_bytes, language)
+        return self._transcribe_faster_whisper(audio_bytes, language)
+
+    def _transcribe_mlx(self, audio_bytes: BytesIO, language: str = None) -> tuple[list[dict], object]:
+        audio = self._wav_to_float32(audio_bytes)
+        kwargs = {"path_or_hf_repo": self._mlx_repo, "word_timestamps": False}
+        if language:
+            kwargs["language"] = language
+        result = self._mlx_module.transcribe(audio, **kwargs)
+        segments = [
+            {"text": s["text"].strip(), "start": round(s["start"], 3), "end": round(s["end"], 3)}
+            for s in result.get("segments", [])
+        ]
+        # Build a compatible info-like object
+        lang = result.get("language", language or "en")
+        info = type("Info", (), {"language": lang, "language_probability": 1.0})()
+        return segments, info
+
+    def _transcribe_faster_whisper(self, audio_bytes: BytesIO, language: str = None) -> tuple[list[dict], object]:
         kwargs = {"beam_size": 1}  # greedy decoding — ~3x faster, negligible quality loss for speech
         if language:
             kwargs["language"] = language

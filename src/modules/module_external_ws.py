@@ -67,6 +67,7 @@ def _transcribe_ws(stt_manager):
     from modules.module_tts import is_tts_playing, needs_mic_flush, clear_mic_flush
     from modules.module_state import set_tars_state, TarsState
 
+    debug = stt_manager.DEBUG
     external_url = stt_manager.config['STT'].get('external_url', '')
     language = CONFIG['STT'].get('language', '').strip() or None
 
@@ -80,12 +81,12 @@ def _transcribe_ws(stt_manager):
     try:
         ws = _websocket.create_connection(ws_url, timeout=5)
     except Exception as e:
-        print(f"[EXTERNAL-WS] Connection failed: {e}", flush=True)
-        queue_message("WARNING: WebSocket connection failed, falling back to HTTP")
+        queue_message(f"ERROR: External WS connection failed: {e}")
         return _transcribe_http(stt_manager)
 
     t_connected = time.monotonic()
-    print(f"[EXTERNAL-WS] Connected in {(t_connected - t_start) * 1000:.0f}ms", flush=True)
+    if debug:
+        print(f"[EXTERNAL-WS] Connected in {(t_connected - t_start) * 1000:.0f}ms", flush=True)
 
     # --- Send config ---
     config_msg = {"sample_rate": stt_manager.MODEL_RATE}
@@ -94,7 +95,7 @@ def _transcribe_ws(stt_manager):
     try:
         ws.send(json.dumps(config_msg))
     except Exception as e:
-        print(f"[EXTERNAL-WS] Config send failed: {e}", flush=True)
+        queue_message(f"ERROR: External WS config send failed: {e}")
         ws.close()
         return _transcribe_http(stt_manager)
 
@@ -118,8 +119,6 @@ def _transcribe_ws(stt_manager):
     max_silent = stt_manager.MAX_SILENT_FRAMES
     min_speech_frames = 5
     aborted = False
-
-    print(f"[EXTERNAL-WS] Listening (vad={stt_manager.vadmethod}, lang={language})", flush=True)
 
     # --- Stream audio ---
     try:
@@ -146,7 +145,7 @@ def _transcribe_ws(stt_manager):
                     ws.send(stt_manager.amplify_audio(data).tobytes(),
                             opcode=_websocket.ABNF.OPCODE_BINARY)
                 except Exception as e:
-                    print(f"[EXTERNAL-WS] send failed: {e}", flush=True)
+                    queue_message(f"ERROR: External WS send failed: {e}")
                     break
 
                 # Run local VAD
@@ -167,16 +166,15 @@ def _transcribe_ws(stt_manager):
                 # Post-speech silence timeout
                 if is_silence and detected_speech and speech_frames >= min_speech_frames:
                     if silent_frames >= max_silent:
-                        print(f"[EXTERNAL-WS] EOT (VAD) after {speech_frames} speech frames", flush=True)
+                        if debug:
+                            print(f"[EXTERNAL-WS] EOT after {speech_frames} speech frames", flush=True)
                         break
 
                 if detected_speech and not is_silence:
-                    if speech_frames == 0:
-                        print("[EXTERNAL-WS] Speech detected, streaming...", flush=True)
                     speech_frames += 1
 
     except Exception as e:
-        print(f"[EXTERNAL-WS] Recording error: {e}", flush=True)
+        queue_message(f"ERROR: External WS recording error: {e}")
 
     t_vad_done = time.monotonic()
 
@@ -201,22 +199,20 @@ def _transcribe_ws(stt_manager):
         result = json.loads(response)
         transcript = result.get("text", "").strip() or None
         if result.get("error"):
-            print(f"[EXTERNAL-WS] Server error: {result['error']}", flush=True)
+            queue_message(f"ERROR: External WS server error: {result['error']}")
             transcript = None
     except Exception as e:
-        print(f"[EXTERNAL-WS] Error receiving result: {e}", flush=True)
+        queue_message(f"ERROR: External WS receive failed: {e}")
     finally:
         try:
             ws.close()
         except Exception:
             pass
 
-    t_result = time.monotonic()
-
-    if transcript:
-        print(f"[EXTERNAL-WS] Final ({(t_result - t_vad_done) * 1000:.0f}ms): {transcript}", flush=True)
-    else:
-        print(f"[EXTERNAL-WS] No transcript ({(t_result - t_vad_done) * 1000:.0f}ms waited)", flush=True)
+    if debug:
+        t_result = time.monotonic()
+        if transcript:
+            print(f"[EXTERNAL-WS] Final ({(t_result - t_vad_done) * 1000:.0f}ms): {transcript}", flush=True)
 
     return transcript
 
@@ -227,24 +223,17 @@ def _transcribe_ws(stt_manager):
 
 def _transcribe_http(stt_manager):
     """Record full utterance, then POST to /transcribe endpoint."""
-    from modules.module_stt import STTManager
-
     try:
         chunks, _ = stt_manager._record_audio_chunks()
         if chunks is None:
             return None
 
         external_url = stt_manager.config['STT'].get('external_url', '')
-        language = CONFIG['STT'].get('language', '').strip() or None
-
-        total_samples = sum(len(c) for c in chunks)
-        print(f"[EXTERNAL-HTTP] Sending {total_samples} samples to {external_url}/transcribe (lang={language})", flush=True)
+        language = "en"
 
         wav_buf = stt_manager._chunks_to_wav_buffer(chunks, stt_manager.MODEL_RATE)
         files = {"audio": ("audio.wav", wav_buf, "audio/wav")}
-        data = {}
-        if language:
-            data["language"] = language
+        data = {"language": language}
         headers = {}
         api_key = os.environ.get('EXTERNAL_API_KEY', '')
         if api_key:
@@ -262,7 +251,6 @@ def _transcribe_http(stt_manager):
         if not transcript:
             return None
 
-        print(f"[EXTERNAL-HTTP] Transcribed: '{transcript}'", flush=True)
         return transcript
     except requests.RequestException as e:
         queue_message(f"ERROR: Server transcription request failed: {e}")

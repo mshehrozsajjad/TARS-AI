@@ -1075,7 +1075,6 @@ class STTManager:
         from modules.module_external_ws import transcribe_streaming
 
         transcript = transcribe_streaming(self)
-        print(f"[DEBUG] External WS returned: {transcript!r}", flush=True)
 
         _, clear_bar = self._get_progress_bar()
         clear_bar()
