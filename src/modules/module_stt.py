@@ -218,6 +218,10 @@ class STTManager:
         self._smart_turn_future = None  # pending inference Future
         self._smart_turn_last_buf_len = 0  # buffer size at last inference submission
 
+        # Post-reply listening: set True when waiting for user's next turn
+        # after TARS finishes speaking.  Allows a longer pre-speech timeout.
+        self._post_reply_listen = False
+
         # Barge-in monitoring
         self._bargein_active = False
         self._bargein_thread = None
@@ -628,6 +632,36 @@ class STTManager:
 
     # === Shared Recording ===
 
+    # Post-reply wait: ~10s with cheap RMS check before giving up.
+    # Each frame = 4000 samples at 16kHz = 250ms, so 40 frames ≈ 10s.
+    POST_REPLY_WAIT_FRAMES = 40
+
+    def _wait_for_reply(self, mic, on_frame=None):
+        """Post-reply patience: wait for user to start speaking.
+
+        Called after TARS finishes a response.  Waits up to ~10s using
+        cheap RMS silence detection.  Once any sound is detected, returns
+        the triggering frame so callers can seed their recording loop.
+
+        Args:
+            mic: Open ResamplingInputStream.
+            on_frame: Optional callback(data) called each frame
+                      (e.g. to stream audio to a remote server).
+
+        Returns:
+            np.ndarray | None: The first non-quiet audio frame, or None
+            if timed out or aborted (TTS started / paused).
+        """
+        for _ in range(self.POST_REPLY_WAIT_FRAMES):
+            data, _ = mic.read(4000)
+            if is_tts_playing() or self.is_paused():
+                return None
+            if on_frame:
+                on_frame(data)
+            if not self._is_quiet(data):
+                return data
+        return None
+
     def _record_audio_chunks(self, use_pre_roll=True, min_speech_frames=5,
                              pre_roll_frames=10, vad_method=None):
         """Record audio until end-of-speech detected.
@@ -668,6 +702,16 @@ class STTManager:
             except Exception:
                 pass
 
+            # Post-reply wait: patient RMS-only listening after TARS speaks
+            if self._post_reply_listen:
+                first = self._wait_for_reply(mic)
+                if first is None:
+                    return None, 0
+                detected_speech = True
+                speech_frames = 1
+                audio_chunks.append(first)
+
+            # Normal VAD recording loop
             for _ in range(self.MAX_RECORDING_FRAMES):
                 data, _ = mic.read(4000)
 
@@ -689,7 +733,6 @@ class STTManager:
                 if not detected_speech and silent_frames >= max_silent and not _gesture_running:
                     _, clear_bar = self._get_progress_bar()
                     clear_bar()
-                    print(f"[DEBUG] No speech after {silent_frames} frames, giving up", flush=True)
                     return None, 0
 
                 # Post-speech: VAD signaled end of turn
@@ -836,6 +879,7 @@ class STTManager:
         try:
             if self.is_paused():
                 queue_message("DEBUG STT: Skipping transcription — paused")
+                self._post_reply_listen = False
                 return None
 
             processors = {
@@ -848,7 +892,6 @@ class STTManager:
                 "deepgram": self._transcribe_with_deepgram,
             }
             processor = self.config["STT"].get("stt_processor", "fastrtc")
-            queue_message(f"DEBUG STT: Dispatching to '{processor}'")
             transcribe_fn = processors.get(processor)
             if transcribe_fn is None:
                 queue_message(f"WARNING: Unknown STT processor '{processor}', falling back to FastRTC")
@@ -857,6 +900,7 @@ class STTManager:
             import modules.module_speed as speed
             speed.start('stt')
             result = transcribe_fn()
+            self._post_reply_listen = False
             stt_dur = speed.stop('stt')
 
             # Speaker ID submission now happens inside _emit_result() so it

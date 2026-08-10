@@ -770,6 +770,7 @@ def post_utterance_callback():
         pass
 
     queue_message("DEBUG: post_utterance_callback -> starting new recording round")
+    stt_manager._post_reply_listen = True
     stt_manager._transcribe_utterance()
 
 # === Initialization ===

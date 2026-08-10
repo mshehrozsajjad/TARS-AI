@@ -264,65 +264,78 @@ def transcribe_streaming(stt_manager):
             except Exception:
                 pass
 
-            for frame_idx in range(stt_manager.MAX_RECORDING_FRAMES):
-                data, _ = mic.read(4000)
+            # Post-reply wait: patient RMS-only listening after TARS speaks
+            if stt_manager._post_reply_listen:
+                def _send_frame(data):
+                    try:
+                        connection.send_media(stt_manager.amplify_audio(data).tobytes())
+                    except Exception:
+                        pass
 
-                # Abort if TTS started
-                if is_tts_playing():
-                    set_tars_state(TarsState.STANDBY)
+                first = stt_manager._wait_for_reply(mic, on_frame=_send_frame)
+                if first is None:
                     aborted = True
-                    break
+                else:
+                    detected_speech = True
+                    speech_frames = 1
+                    _send_frame(first)
 
-                # Send audio to Deepgram in real-time
-                try:
-                    connection.send_media(stt_manager.amplify_audio(data).tobytes())
-                except Exception as e:
-                    print(f"[DEEPGRAM] send_media failed: {e}", flush=True)
-                    break
+            if not aborted:
+                for frame_idx in range(stt_manager.MAX_RECORDING_FRAMES):
+                    data, _ = mic.read(4000)
 
-                # Run local VAD
-                is_silence, detected_speech, silent_frames = vad_func(data, detected_speech, silent_frames)
-
-                # ----- Fast path: Deepgram end-of-turn confidence -----
-                # Instead of breaking immediately, start a grace period so the
-                # user can continue with another sentence.  If they resume
-                # speaking (VAD detects non-silence), the countdown resets.
-                if _eot.is_set() and detected_speech and speech_frames >= min_speech_frames:
-                    if eot_grace_countdown < 0:
-                        eot_grace_countdown = EOT_GRACE_FRAMES
-                        _eot.clear()
-
-                if eot_grace_countdown >= 0:
-                    if not is_silence:
-                        # User resumed speaking — cancel the countdown
-                        eot_grace_countdown = -1
-                        _eot.clear()
-                    elif eot_grace_countdown == 0:
-                        print(f"[DEEPGRAM] EOT (Deepgram+grace) after {speech_frames} speech frames "
-                              f"({(time.monotonic() - t_connected)*1000:.0f}ms)", flush=True)
-                        break
-                    else:
-                        eot_grace_countdown -= 1
-
-                # ----- Slow fallback: local VAD silence timeout -----
-                _gesture_running = False
-                try:
-                    from modules.module_gestures import gesture_active
-                    _gesture_running = gesture_active
-                except Exception:
-                    pass
-                if not detected_speech and silent_frames >= max_silent_pre_speech and not _gesture_running:
-                    break  # No speech detected, give up
-
-                if is_silence and detected_speech and speech_frames >= min_speech_frames:
-                    if silent_frames >= max_silent_post_speech:
-                        print(f"[DEEPGRAM] EOT (VAD) after {speech_frames} speech frames", flush=True)
+                    # Abort if TTS started
+                    if is_tts_playing():
+                        set_tars_state(TarsState.STANDBY)
+                        aborted = True
                         break
 
-                if detected_speech and not is_silence:
-                    if speech_frames == 0:
-                        print("[DEEPGRAM] Speech detected, streaming...", flush=True)
-                    speech_frames += 1
+                    # Send audio to Deepgram in real-time
+                    try:
+                        connection.send_media(stt_manager.amplify_audio(data).tobytes())
+                    except Exception as e:
+                        print(f"[DEEPGRAM] send_media failed: {e}", flush=True)
+                        break
+
+                    # Run local VAD
+                    is_silence, detected_speech, silent_frames = vad_func(data, detected_speech, silent_frames)
+
+                    # ----- Fast path: Deepgram end-of-turn confidence -----
+                    if _eot.is_set() and detected_speech and speech_frames >= min_speech_frames:
+                        if eot_grace_countdown < 0:
+                            eot_grace_countdown = EOT_GRACE_FRAMES
+                            _eot.clear()
+
+                    if eot_grace_countdown >= 0:
+                        if not is_silence:
+                            eot_grace_countdown = -1
+                            _eot.clear()
+                        elif eot_grace_countdown == 0:
+                            print(f"[DEEPGRAM] EOT (Deepgram+grace) after {speech_frames} speech frames "
+                                  f"({(time.monotonic() - t_connected)*1000:.0f}ms)", flush=True)
+                            break
+                        else:
+                            eot_grace_countdown -= 1
+
+                    # ----- Slow fallback: local VAD silence timeout -----
+                    _gesture_running = False
+                    try:
+                        from modules.module_gestures import gesture_active
+                        _gesture_running = gesture_active
+                    except Exception:
+                        pass
+                    if not detected_speech and silent_frames >= max_silent_pre_speech and not _gesture_running:
+                        break
+
+                    if is_silence and detected_speech and speech_frames >= min_speech_frames:
+                        if silent_frames >= max_silent_post_speech:
+                            print(f"[DEEPGRAM] EOT (VAD) after {speech_frames} speech frames", flush=True)
+                            break
+
+                    if detected_speech and not is_silence:
+                        if speech_frames == 0:
+                            print("[DEEPGRAM] Speech detected, streaming...", flush=True)
+                        speech_frames += 1
 
     except Exception as e:
         print(f"[DEEPGRAM] Recording error: {e}", flush=True)

@@ -68,6 +68,7 @@ def _transcribe_ws(stt_manager):
     from modules.module_state import set_tars_state, TarsState
 
     debug = stt_manager.DEBUG
+    post_reply = stt_manager._post_reply_listen
     external_url = stt_manager.config['STT'].get('external_url', '')
     language = CONFIG['STT'].get('language', '').strip() or None
 
@@ -99,7 +100,7 @@ def _transcribe_ws(stt_manager):
         ws.close()
         return _transcribe_http(stt_manager)
 
-    # --- VAD setup (same as module_deepgram) ---
+    # --- VAD setup ---
     vad_dispatch = {
         "silero": stt_manager._is_silence_detected_silero,
         "sherpa-onnx": stt_manager._is_silence_detected_sherpa_onnx,
@@ -131,47 +132,68 @@ def _transcribe_ws(stt_manager):
             except Exception:
                 pass
 
-            for frame_idx in range(stt_manager.MAX_RECORDING_FRAMES):
-                data, _ = mic.read(4000)
+            # Post-reply wait: patient RMS-only listening after TARS speaks.
+            # Audio is streamed to the server during the wait so it's buffered.
+            if post_reply:
+                def _send_frame(data):
+                    try:
+                        ws.send(stt_manager.amplify_audio(data).tobytes(),
+                                opcode=_websocket.ABNF.OPCODE_BINARY)
+                    except Exception:
+                        pass
 
-                # Abort if TTS started playing
-                if is_tts_playing():
-                    set_tars_state(TarsState.STANDBY)
+                first = stt_manager._wait_for_reply(mic, on_frame=_send_frame)
+                if first is None:
                     aborted = True
-                    break
+                else:
+                    detected_speech = True
+                    speech_frames = 1
+                    # Send the triggering frame too
+                    _send_frame(first)
 
-                # Send amplified audio to server in real-time
-                try:
-                    ws.send(stt_manager.amplify_audio(data).tobytes(),
-                            opcode=_websocket.ABNF.OPCODE_BINARY)
-                except Exception as e:
-                    queue_message(f"ERROR: External WS send failed: {e}")
-                    break
+            # Normal VAD recording loop
+            if not aborted:
+                for frame_idx in range(stt_manager.MAX_RECORDING_FRAMES):
+                    data, _ = mic.read(4000)
 
-                # Run local VAD
-                is_silence, detected_speech, silent_frames = vad_func(
-                    data, detected_speech, silent_frames
-                )
-
-                # Pre-speech timeout
-                _gesture_running = False
-                try:
-                    from modules.module_gestures import gesture_active
-                    _gesture_running = gesture_active
-                except Exception:
-                    pass
-                if not detected_speech and silent_frames >= max_silent and not _gesture_running:
-                    break
-
-                # Post-speech silence timeout
-                if is_silence and detected_speech and speech_frames >= min_speech_frames:
-                    if silent_frames >= max_silent:
-                        if debug:
-                            print(f"[EXTERNAL-WS] EOT after {speech_frames} speech frames", flush=True)
+                    # Abort if TTS started playing
+                    if is_tts_playing():
+                        set_tars_state(TarsState.STANDBY)
+                        aborted = True
                         break
 
-                if detected_speech and not is_silence:
-                    speech_frames += 1
+                    # Send amplified audio to server in real-time
+                    try:
+                        ws.send(stt_manager.amplify_audio(data).tobytes(),
+                                opcode=_websocket.ABNF.OPCODE_BINARY)
+                    except Exception as e:
+                        queue_message(f"ERROR: External WS send failed: {e}")
+                        break
+
+                    # Run local VAD
+                    is_silence, detected_speech, silent_frames = vad_func(
+                        data, detected_speech, silent_frames
+                    )
+
+                    # Pre-speech timeout
+                    _gesture_running = False
+                    try:
+                        from modules.module_gestures import gesture_active
+                        _gesture_running = gesture_active
+                    except Exception:
+                        pass
+                    if not detected_speech and silent_frames >= max_silent and not _gesture_running:
+                        break
+
+                    # Post-speech silence timeout
+                    if is_silence and detected_speech and speech_frames >= min_speech_frames:
+                        if silent_frames >= max_silent:
+                            if debug:
+                                print(f"[EXTERNAL-WS] EOT after {speech_frames} speech frames", flush=True)
+                            break
+
+                    if detected_speech and not is_silence:
+                        speech_frames += 1
 
     except Exception as e:
         queue_message(f"ERROR: External WS recording error: {e}")
