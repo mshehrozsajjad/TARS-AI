@@ -52,7 +52,7 @@ def _execute_movement(movements):
     try:
         from modules.module_movements import (
             walk_forward, walk_backward,
-            turn_right_slow, turn_left_slow,
+            turn_right, turn_left,
             laugh, excited, swing_legs,
             pose, bow,
             tilt_right, tilt_left, side_side,
@@ -66,8 +66,8 @@ def _execute_movement(movements):
     action_map = {
         "forward": walk_forward,
         "backward": walk_backward,
-        "left": turn_left_slow,
-        "right": turn_right_slow,
+        "left": turn_left,
+        "right": turn_right,
         "laugh": laugh,
         "excited": excited,
         "swing_legs": swing_legs,
