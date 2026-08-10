@@ -25,7 +25,6 @@ from modules.module_movements import (
     simple_rock,
     simple_bounce,
     simple_shrug,
-    simple_wave,
     simple_settle,
     fidget_weight_shift,
     fidget_settle,
@@ -42,7 +41,6 @@ GESTURES = {
     "rock":    {"fn": simple_rock,    "desc": "Disagreement, thinking, 'no way'"},
     "bounce":  {"fn": simple_bounce,  "desc": "Joy, excitement, laughter"},
     "shrug":   {"fn": simple_shrug,   "desc": "Uncertainty, 'who knows'"},
-    "wave":    {"fn": simple_wave,    "desc": "Greeting, hello/goodbye"},
     "settle":  {"fn": simple_settle,  "desc": "Calm acceptance, respect, gratitude"},
 }
 
