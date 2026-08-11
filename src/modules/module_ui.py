@@ -155,8 +155,8 @@ class UIManager(threading.Thread):
             try:
                 print("LOAD: Initializing camera module...")
                 self.camera_module = CameraModule(
-                    self.logical_width,
-                    self.logical_height,
+                    640,
+                    480,
                     use_camera_module=True
                 )
 

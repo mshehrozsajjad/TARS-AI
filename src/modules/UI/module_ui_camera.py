@@ -23,8 +23,6 @@ class CameraModule:
         apply_corrections = True
 
         if self._initialized:
-            if (width, height) != getattr(self, '_init_size', (width, height)):
-                print(f"WARNING: CameraModule singleton already initialized at {self._init_size}, ignoring ({width}, {height})")
             return
         self._initialized = True
         self._init_size = (width, height)
