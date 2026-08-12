@@ -392,7 +392,12 @@ def logout():
 @flask_app.route('/kiosk')
 def kiosk():
     """On-device kiosk display — no auth required (local only)."""
-    return render_template('kiosk.html', char_name=character_name)
+    return render_template('kiosk.html',
+                           char_name=character_name,
+                           screensaver_list=CONFIG['UI'].get('screensaver_list', ['starfield']),
+                           screensaver_timeout=CONFIG['UI'].get('screensaver_timer', 300),
+                           screensaver_cycle=CONFIG['UI'].get('screensaver_cycle_interval', 300),
+                           show_time=CONFIG['UI'].get('show_time', True))
 
 @flask_app.route('/holo')
 def holo():

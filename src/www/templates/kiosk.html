@@ -54,6 +54,10 @@
 
   <script>
     const CHAR_NAME = "{{ char_name }}";
+    const SCREENSAVER_LIST = {{ screensaver_list | tojson }};
+    const SCREENSAVER_TIMEOUT_SEC = {{ screensaver_timeout }};
+    const SCREENSAVER_CYCLE_SEC = {{ screensaver_cycle }};
+    const SHOW_TIME = {{ show_time | tojson }};
   </script>
   <script src="{{ url_for('static', filename='js/kiosk.js') }}"></script>
 </body>

@@ -24,7 +24,6 @@ let currentStatus = 'BOOTING';
 let screensaverActive = false;
 let screensaverTimer = null;
 let lastStreamMsg = null;   // reference to the last bot message element (for streaming)
-const SCREENSAVER_TIMEOUT = 300000; // 5 minutes
 const MAX_MESSAGES = 50;
 
 // Mic level state
@@ -117,62 +116,146 @@ function updateClock() {
 setInterval(updateClock, 10000);
 updateClock();
 
-// ── Screensaver ────────────────────────────────────────────────────────────
-let starCtx, stars = [];
+// ── Screensaver system ─────────────────────────────────────────────────────
+const AVAILABLE_SCREENSAVERS = ['starfield', 'matrix', 'hyperspace', 'blackhole'];
+const enabledScreensavers = SCREENSAVER_LIST.filter(s => AVAILABLE_SCREENSAVERS.includes(s));
+if (enabledScreensavers.length === 0) enabledScreensavers.push('starfield');
 
-function initStars() {
-  const canvas = $screensaverCanvas;
-  canvas.width = window.innerWidth;
-  canvas.height = window.innerHeight;
-  starCtx = canvas.getContext('2d');
-  stars = [];
-  for (let i = 0; i < 150; i++) {
-    stars.push({
-      x: Math.random() * canvas.width,
-      y: Math.random() * canvas.height,
-      size: Math.random() * 2 + 0.5,
-      speed: Math.random() * 0.3 + 0.1,
-      alpha: Math.random(),
-    });
-  }
+let ssCtx, ssAnim = null, ssCycleTimer = null, ssCurrentIdx = 0;
+
+function ssResize() {
+  // Use parent dimensions (rotated container) not window
+  const parent = $screensaverCanvas.parentElement;
+  $screensaverCanvas.width = parent.clientWidth || window.innerHeight;
+  $screensaverCanvas.height = parent.clientHeight || window.innerWidth;
+  ssCtx = $screensaverCanvas.getContext('2d');
 }
 
-function drawStars() {
-  if (!screensaverActive) return;
-  const c = $screensaverCanvas;
-  starCtx.fillStyle = '#000';
-  starCtx.fillRect(0, 0, c.width, c.height);
-  for (const s of stars) {
-    s.alpha += (Math.random() - 0.5) * 0.05;
-    s.alpha = Math.max(0.2, Math.min(1, s.alpha));
-    s.y += s.speed;
-    if (s.y > c.height) { s.y = 0; s.x = Math.random() * c.width; }
-    starCtx.fillStyle = `rgba(0,255,255,${s.alpha})`;
-    starCtx.beginPath();
-    starCtx.arc(s.x, s.y, s.size, 0, Math.PI * 2);
-    starCtx.fill();
+// ── Starfield ──
+function initStarfield(w, h) {
+  const stars = [];
+  for (let i = 0; i < 150; i++)
+    stars.push({ x: Math.random()*w, y: Math.random()*h, size: Math.random()*2+0.5, speed: Math.random()*0.3+0.1, alpha: Math.random() });
+  return function draw() {
+    ssCtx.fillStyle = '#000'; ssCtx.fillRect(0,0,w,h);
+    for (const s of stars) {
+      s.alpha += (Math.random()-0.5)*0.05; s.alpha = Math.max(0.2, Math.min(1, s.alpha));
+      s.y += s.speed; if (s.y > h) { s.y = 0; s.x = Math.random()*w; }
+      ssCtx.fillStyle = `rgba(0,255,255,${s.alpha})`; ssCtx.beginPath(); ssCtx.arc(s.x, s.y, s.size, 0, Math.PI*2); ssCtx.fill();
+    }
+  };
+}
+
+// ── Matrix ──
+function initMatrix(w, h) {
+  const fontSize = 14, cols = Math.floor(w/fontSize);
+  const drops = Array(cols).fill(1);
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@#$%^&*(){}[]<>';
+  return function draw() {
+    ssCtx.fillStyle = 'rgba(0,0,0,0.05)'; ssCtx.fillRect(0,0,w,h);
+    ssCtx.fillStyle = '#0f0'; ssCtx.font = fontSize + 'px monospace';
+    for (let i = 0; i < drops.length; i++) {
+      const ch = chars[Math.floor(Math.random()*chars.length)];
+      const x = i * fontSize, y = drops[i] * fontSize;
+      ssCtx.fillStyle = y < h*0.3 ? '#0f0' : `rgba(0,255,0,${0.8-y/h*0.6})`;
+      ssCtx.fillText(ch, x, y);
+      if (y > h && Math.random() > 0.975) drops[i] = 0;
+      drops[i]++;
+    }
+  };
+}
+
+// ── Hyperspace ──
+function initHyperspace(w, h) {
+  const cx = w/2, cy = h/2;
+  const stars = [];
+  for (let i = 0; i < 200; i++)
+    stars.push({ x: (Math.random()-0.5)*w*2, y: (Math.random()-0.5)*h*2, z: Math.random()*w });
+  return function draw() {
+    ssCtx.fillStyle = 'rgba(0,0,0,0.15)'; ssCtx.fillRect(0,0,w,h);
+    for (const s of stars) {
+      s.z -= 8;
+      if (s.z <= 0) { s.x = (Math.random()-0.5)*w*2; s.y = (Math.random()-0.5)*h*2; s.z = w; }
+      const sx = (s.x/s.z)*w*0.5 + cx, sy = (s.y/s.z)*h*0.5 + cy;
+      const r = Math.max(0.5, (1-s.z/w)*3);
+      const a = Math.min(1, (1-s.z/w)*1.5);
+      ssCtx.fillStyle = `rgba(200,220,255,${a})`;
+      // Draw streak
+      const px = (s.x/(s.z+8))*w*0.5 + cx, py = (s.y/(s.z+8))*h*0.5 + cy;
+      ssCtx.beginPath(); ssCtx.moveTo(px,py); ssCtx.lineTo(sx,sy); ssCtx.lineWidth = r;
+      ssCtx.strokeStyle = `rgba(200,220,255,${a})`; ssCtx.stroke();
+    }
+  };
+}
+
+// ── Blackhole ──
+function initBlackhole(w, h) {
+  const cx = w/2, cy = h/2;
+  const particles = [];
+  for (let i = 0; i < 120; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const dist = 50 + Math.random() * Math.max(w,h) * 0.4;
+    particles.push({ angle, dist, speed: 0.005 + Math.random()*0.015, size: Math.random()*2+0.5, decay: 0.998 + Math.random()*0.001 });
   }
-  requestAnimationFrame(drawStars);
+  return function draw() {
+    ssCtx.fillStyle = 'rgba(0,0,0,0.08)'; ssCtx.fillRect(0,0,w,h);
+    // Glow at center
+    const grd = ssCtx.createRadialGradient(cx,cy,2,cx,cy,30);
+    grd.addColorStop(0, 'rgba(80,0,120,0.3)'); grd.addColorStop(1, 'rgba(0,0,0,0)');
+    ssCtx.fillStyle = grd; ssCtx.fillRect(cx-30,cy-30,60,60);
+    for (const p of particles) {
+      p.angle += p.speed;
+      p.dist *= p.decay;
+      if (p.dist < 5) { p.dist = 50 + Math.random() * Math.max(w,h)*0.4; p.speed = 0.005 + Math.random()*0.015; }
+      p.speed += 0.0001; // accelerate as it spirals in
+      const x = cx + Math.cos(p.angle) * p.dist;
+      const y = cy + Math.sin(p.angle) * p.dist;
+      const a = Math.min(1, p.dist / 100);
+      const hue = (p.dist < 80) ? '180,0,255' : '0,200,255';
+      ssCtx.fillStyle = `rgba(${hue},${a})`;
+      ssCtx.beginPath(); ssCtx.arc(x, y, p.size, 0, Math.PI*2); ssCtx.fill();
+    }
+  };
+}
+
+// ── Screensaver lifecycle ──
+const ssFactories = { starfield: initStarfield, matrix: initMatrix, hyperspace: initHyperspace, blackhole: initBlackhole };
+
+function startScreensaver(name) {
+  ssResize();
+  const w = $screensaverCanvas.width, h = $screensaverCanvas.height;
+  const factory = ssFactories[name] || ssFactories.starfield;
+  const drawFn = factory(w, h);
+  if (ssAnim) clearInterval(ssAnim);
+  ssAnim = setInterval(drawFn, 50); // ~20fps
+}
+
+function cycleScreensaver() {
+  ssCurrentIdx = (ssCurrentIdx + 1) % enabledScreensavers.length;
+  startScreensaver(enabledScreensavers[ssCurrentIdx]);
 }
 
 function activateScreensaver() {
   if (screensaverActive) return;
   screensaverActive = true;
   $screensaver.classList.remove('hidden');
-  initStars();
-  drawStars();
+  ssCurrentIdx = Math.floor(Math.random() * enabledScreensavers.length);
+  startScreensaver(enabledScreensavers[ssCurrentIdx]);
+  ssCycleTimer = setInterval(cycleScreensaver, SCREENSAVER_CYCLE_SEC * 1000);
   updateClock();
 }
 
 function deactivateScreensaver() {
   screensaverActive = false;
   $screensaver.classList.add('hidden');
+  if (ssAnim) { clearInterval(ssAnim); ssAnim = null; }
+  if (ssCycleTimer) { clearInterval(ssCycleTimer); ssCycleTimer = null; }
   resetScreensaverTimer();
 }
 
 function resetScreensaverTimer() {
   clearTimeout(screensaverTimer);
-  screensaverTimer = setTimeout(activateScreensaver, SCREENSAVER_TIMEOUT);
+  screensaverTimer = setTimeout(activateScreensaver, SCREENSAVER_TIMEOUT_SEC * 1000);
 }
 resetScreensaverTimer();
 
