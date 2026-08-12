@@ -130,6 +130,14 @@ html, body {
 .msg-system .speaker { color: var(--system-color); }
 .msg-system .text { color: var(--system-color); }
 
+/* ── Mic level indicator ── */
+#mic-level {
+  width: 100%;
+  height: 6px;
+  flex-shrink: 0;
+  background: var(--bg);
+}
+
 /* ── Bottom status bar ── */
 #statusbar {
   height: 32px;

@@ -17,12 +17,85 @@ const $screensaverClock = document.getElementById('screensaver-clock');
 const $overlayWrap = document.getElementById('overlay-image');
 const $overlayImg  = document.getElementById('overlay-img');
 
+const $micCanvas  = document.getElementById('mic-level');
+const micCtx      = $micCanvas.getContext('2d');
+
 let currentStatus = 'BOOTING';
 let screensaverActive = false;
 let screensaverTimer = null;
 let lastStreamMsg = null;   // reference to the last bot message element (for streaming)
 const SCREENSAVER_TIMEOUT = 300000; // 5 minutes
 const MAX_MESSAGES = 50;
+
+// Mic level state
+let micActive = false;
+let micSilenceProgress = 0;
+let micSilenceMax = 1;
+let micAnimFrame = null;
+
+// ── Mic level indicator ────────────────────────────────────────────────────
+function resizeMicCanvas() {
+  $micCanvas.width = $micCanvas.parentElement.clientWidth || $micCanvas.offsetWidth;
+}
+resizeMicCanvas();
+window.addEventListener('resize', resizeMicCanvas);
+
+function drawMicLevel() {
+  const w = $micCanvas.width;
+  const h = $micCanvas.height;
+  micCtx.clearRect(0, 0, w, h);
+
+  if (currentStatus !== 'LISTENING' && currentStatus !== 'TALKING') {
+    micAnimFrame = null;
+    return;
+  }
+
+  const barCount = 40;
+  const barWidth = w / barCount;
+  const isListening = currentStatus === 'LISTENING';
+  const isTalking = currentStatus === 'TALKING';
+
+  for (let i = 0; i < barCount; i++) {
+    let level;
+    if (isTalking) {
+      // Smooth wave animation when TARS is talking
+      level = 0.3 + 0.7 * Math.abs(Math.sin((Date.now() / 200) + i * 0.3));
+    } else if (micSilenceProgress === 0) {
+      // Speech detected — active random bars
+      level = 0.3 + Math.random() * 0.7;
+    } else {
+      // Silence — bars decay based on progress
+      const decay = 1 - (micSilenceProgress / Math.max(1, micSilenceMax));
+      level = Math.max(0.05, decay * (0.2 + Math.random() * 0.3));
+    }
+
+    const barH = level * h;
+    const y = (h - barH) / 2;
+
+    // Color: cyan when active, dims toward dark as silence grows
+    const alpha = isListening ? (micSilenceProgress === 0 ? 0.9 : 0.3 + 0.6 * (1 - micSilenceProgress / Math.max(1, micSilenceMax))) : 0.7;
+    micCtx.fillStyle = isTalking
+      ? `rgba(0, 255, 100, ${alpha})`
+      : `rgba(0, 255, 255, ${alpha})`;
+    micCtx.fillRect(i * barWidth + 1, y, barWidth - 2, barH);
+  }
+
+  micAnimFrame = requestAnimationFrame(drawMicLevel);
+}
+
+function startMicAnimation() {
+  if (!micAnimFrame) {
+    micAnimFrame = requestAnimationFrame(drawMicLevel);
+  }
+}
+
+function stopMicAnimation() {
+  if (micAnimFrame) {
+    cancelAnimationFrame(micAnimFrame);
+    micAnimFrame = null;
+  }
+  micCtx.clearRect(0, 0, $micCanvas.width, $micCanvas.height);
+}
 
 // ── Clock ──────────────────────────────────────────────────────────────────
 function updateClock() {
@@ -154,6 +227,14 @@ function setStatus(status) {
 
   // Toolbar indicator
   $toolbarStatus.textContent = status === 'THINKING' ? '[PROCESSING]' : '[ACTIVE]';
+
+  // Mic level animation
+  if (status === 'LISTENING' || status === 'TALKING') {
+    micSilenceProgress = 0;
+    startMicAnimation();
+  } else {
+    stopMicAnimation();
+  }
 }
 
 // ── SocketIO events ────────────────────────────────────────────────────────
@@ -196,12 +277,18 @@ socket.on('kiosk_status', (data) => {
 });
 
 socket.on('kiosk_silence', (data) => {
+  micSilenceProgress = data.progress;
+  micSilenceMax = data.max || 1;
+
   if (data.max > 0 && data.progress > 0) {
     const pct = Math.min(100, (data.progress / data.max) * 100);
     $silenceFill.style.width = pct + '%';
   } else {
     $silenceFill.style.width = '0%';
   }
+
+  // Ensure mic animation is running during listening
+  if (currentStatus === 'LISTENING') startMicAnimation();
 });
 
 socket.on('kiosk_think', () => {
