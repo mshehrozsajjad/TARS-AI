@@ -458,15 +458,12 @@ document.getElementById('btn-power').addEventListener('click', () => {
 document.getElementById('btn-power-cancel').addEventListener('click', () => {
   $powerMenu.classList.add('hidden');
 });
-document.getElementById('btn-reboot').addEventListener('click', () => {
-  fetch('/reboot_program', { method: 'POST' }).catch(() => {});
+document.getElementById('btn-close').addEventListener('click', () => {
+  fetch('/api/exit', { method: 'POST' }).catch(() => {});
   $powerMenu.classList.add('hidden');
 });
 document.getElementById('btn-shutdown').addEventListener('click', () => {
-  fetch('/api/shutdown', { method: 'POST' }).catch(() => {
-    // Fallback — direct shutdown if no endpoint
-    fetch('/reboot_program', { method: 'POST' }).catch(() => {});
-  });
+  fetch('/api/shutdown', { method: 'POST' }).catch(() => {});
   $powerMenu.classList.add('hidden');
 });
 

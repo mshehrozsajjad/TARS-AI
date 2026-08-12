@@ -2026,6 +2026,30 @@ def reboot_program():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@flask_app.route('/api/shutdown', methods=['POST'])
+def shutdown_pi():
+    """Shutdown the Raspberry Pi."""
+    try:
+        queue_message("INFO: Shutdown requested from kiosk UI")
+        import subprocess
+        subprocess.Popen(['sudo', 'shutdown', 'now'], start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return jsonify({"success": True, "message": "Shutting down..."})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@flask_app.route('/api/exit', methods=['POST'])
+def exit_program():
+    """Exit the TARS-AI program without restarting."""
+    try:
+        queue_message("INFO: Exit requested from kiosk UI")
+        threading.Thread(target=lambda: (time.sleep(0.5), os._exit(0)), daemon=True).start()
+        return jsonify({"success": True, "message": "Exiting..."})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @flask_app.route('/config_sync_status', methods=['GET'])
 def config_sync_status():
     """
