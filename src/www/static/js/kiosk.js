@@ -84,18 +84,18 @@ function drawMicLevel() {
     micCtx.fillRect(i * barWidth + 1, y, barWidth - 2, barH);
   }
 
-  micAnimFrame = requestAnimationFrame(drawMicLevel);
+  micAnimFrame = setTimeout(drawMicLevel, 66);  // ~15fps
 }
 
 function startMicAnimation() {
   if (!micAnimFrame) {
-    micAnimFrame = requestAnimationFrame(drawMicLevel);
+    micAnimFrame = setTimeout(drawMicLevel, 66);
   }
 }
 
 function stopMicAnimation() {
   if (micAnimFrame) {
-    cancelAnimationFrame(micAnimFrame);
+    clearTimeout(micAnimFrame);
     micAnimFrame = null;
   }
   micCtx.clearRect(0, 0, $micCanvas.width, $micCanvas.height);

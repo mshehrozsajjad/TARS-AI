@@ -90,8 +90,12 @@ class UIManagerBrowser(threading.Thread):
             subprocess.run(['pkill', '-f', 'chromium.*kiosk'], capture_output=True)
             time.sleep(0.5)
 
+            # Disable screen blanking / DPMS sleep
             env = os.environ.copy()
             env['DISPLAY'] = ':0'
+            subprocess.run(['xset', 's', 'off'], env=env, capture_output=True)
+            subprocess.run(['xset', '-dpms'], env=env, capture_output=True)
+            subprocess.run(['xset', 's', 'noblank'], env=env, capture_output=True)
 
             self._chromium_proc = subprocess.Popen(
                 [
@@ -185,7 +189,13 @@ class UIManagerBrowser(threading.Thread):
             'max': speechdelay,
         })
 
+    _last_mic_emit = 0
+
     def set_mic_level(self, level):
+        now = time.monotonic()
+        if now - self._last_mic_emit < 0.15:  # max ~7 events/sec
+            return
+        self._last_mic_emit = now
         self._emit('kiosk_mic_level', {'level': level})
 
     def set_tars_status(self, status):
