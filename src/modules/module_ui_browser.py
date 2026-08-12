@@ -104,6 +104,7 @@ class UIManagerBrowser(threading.Thread):
                     '--no-first-run',
                     '--start-fullscreen',
                     '--autoplay-policy=no-user-gesture-required',
+                    '--password-store=basic',
                     url,
                 ],
                 env=env,
