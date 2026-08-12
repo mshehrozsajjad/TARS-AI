@@ -397,7 +397,10 @@ def kiosk():
                            screensaver_list=CONFIG['UI'].get('screensaver_list', ['starfield']),
                            screensaver_timeout=CONFIG['UI'].get('screensaver_timer', 300),
                            screensaver_cycle=CONFIG['UI'].get('screensaver_cycle_interval', 300),
-                           show_time=CONFIG['UI'].get('show_time', True))
+                           show_time=CONFIG['UI'].get('show_time', True),
+                           latitude=CONFIG['CHAR'].get('latitude', ''),
+                           longitude=CONFIG['CHAR'].get('longitude', ''),
+                           ampm=CONFIG['UI'].get('ampm_format', True))
 
 @flask_app.route('/holo')
 def holo():

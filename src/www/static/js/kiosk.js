@@ -16,9 +16,14 @@ const $screensaverCanvas = document.getElementById('screensaver-canvas');
 const $screensaverClock = document.getElementById('screensaver-clock');
 const $overlayWrap = document.getElementById('overlay-image');
 const $overlayImg  = document.getElementById('overlay-img');
+const $powerMenu  = document.getElementById('power-menu');
+const $toolbarInfo = document.getElementById('toolbar-info');
+const $wifi       = document.getElementById('wifi-indicator');
 
 const $micCanvas  = document.getElementById('mic-level');
 const micCtx      = $micCanvas.getContext('2d');
+
+let outdoorTemp = null;
 
 let currentStatus = 'BOOTING';
 let screensaverActive = false;
@@ -100,21 +105,39 @@ function stopMicAnimation() {
   micCtx.clearRect(0, 0, $micCanvas.width, $micCanvas.height);
 }
 
-// ── Clock ──────────────────────────────────────────────────────────────────
-function updateClock() {
+// ── Clock + outdoor temperature ────────────────────────────────────────────
+function formatTime() {
   const now = new Date();
   const h = now.getHours();
   const m = String(now.getMinutes()).padStart(2, '0');
-  const ampm = h >= 12 ? 'PM' : 'AM';
-  const h12 = h % 12 || 12;
-  $toolbarTime.textContent = `${h12}:${m} ${ampm}`;
+  if (AMPM) {
+    return `${h % 12 || 12}:${m} ${h >= 12 ? 'PM' : 'AM'}`;
+  }
+  return `${String(h).padStart(2, '0')}:${m}`;
+}
 
-  if (screensaverActive) {
-    $screensaverClock.textContent = `${h12}:${m} ${ampm}`;
+function updateClock() {
+  const time = formatTime();
+  const tempStr = outdoorTemp !== null ? ` | ${Math.round(outdoorTemp)}C` : '';
+  $toolbarInfo.textContent = time + tempStr;
+
+  if (screensaverActive && SHOW_TIME) {
+    $screensaverClock.textContent = time + tempStr;
   }
 }
 setInterval(updateClock, 10000);
 updateClock();
+
+// Fetch outdoor temp from Open-Meteo (free, no API key)
+function fetchOutdoorTemp() {
+  if (!LATITUDE || !LONGITUDE) return;
+  fetch(`https://api.open-meteo.com/v1/forecast?latitude=${LATITUDE}&longitude=${LONGITUDE}&current=temperature_2m&timezone=auto`)
+    .then(r => r.json())
+    .then(d => { outdoorTemp = d.current.temperature_2m; updateClock(); })
+    .catch(() => {});
+}
+fetchOutdoorTemp();
+setInterval(fetchOutdoorTemp, 600000); // refresh every 10 min
 
 // ── Screensaver system ─────────────────────────────────────────────────────
 const AVAILABLE_SCREENSAVERS = ['starfield', 'matrix', 'hyperspace', 'blackhole'];
@@ -427,6 +450,44 @@ socket.on('kiosk_overlay', (data) => {
     $overlayWrap.classList.add('hidden');
   }, (data.duration || 8) * 1000);
 });
+
+// ── Power menu ─────────────────────────────────────────────────────────────
+document.getElementById('btn-power').addEventListener('click', () => {
+  $powerMenu.classList.toggle('hidden');
+});
+document.getElementById('btn-power-cancel').addEventListener('click', () => {
+  $powerMenu.classList.add('hidden');
+});
+document.getElementById('btn-reboot').addEventListener('click', () => {
+  fetch('/reboot_program', { method: 'POST' }).catch(() => {});
+  $powerMenu.classList.add('hidden');
+});
+document.getElementById('btn-shutdown').addEventListener('click', () => {
+  fetch('/api/shutdown', { method: 'POST' }).catch(() => {
+    // Fallback — direct shutdown if no endpoint
+    fetch('/reboot_program', { method: 'POST' }).catch(() => {});
+  });
+  $powerMenu.classList.add('hidden');
+});
+
+// ── WiFi status ────────────────────────────────────────────────────────────
+function updateWifi() {
+  fetch('/api/wifi/status')
+    .then(r => r.json())
+    .then(d => {
+      if (!d.connected) {
+        $wifi.textContent = 'W:OFF';
+        $wifi.className = 'wifi-off';
+      } else {
+        const signal = d.signal || 0;
+        $wifi.textContent = `W:${signal}%`;
+        $wifi.className = signal > 60 ? 'wifi-good' : signal > 30 ? 'wifi-fair' : 'wifi-poor';
+      }
+    })
+    .catch(() => { $wifi.textContent = 'W:--'; $wifi.className = 'wifi-off'; });
+}
+updateWifi();
+setInterval(updateWifi, 30000); // refresh every 30s
 
 // ── Init ───────────────────────────────────────────────────────────────────
 socket.on('connect', () => {

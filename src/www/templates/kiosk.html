@@ -15,6 +15,17 @@
     <div id="screensaver-clock"></div>
   </div>
 
+  <!-- Power menu overlay -->
+  <div id="power-menu" class="power-menu hidden">
+    <div class="power-menu-panel">
+      <div class="power-menu-title">POWER</div>
+      <div class="power-menu-divider"></div>
+      <button class="power-btn" id="btn-reboot">REBOOT</button>
+      <button class="power-btn power-btn-danger" id="btn-shutdown">SHUTDOWN</button>
+      <button class="power-btn" id="btn-power-cancel">CANCEL</button>
+    </div>
+  </div>
+
   <!-- Overlay image -->
   <div id="overlay-image" class="overlay-image hidden">
     <img id="overlay-img" src="" alt="">
@@ -26,7 +37,8 @@
     <div id="toolbar">
       <span class="toolbar-id">TERM-A1</span>
       <span id="toolbar-status" class="toolbar-label">[ACTIVE]</span>
-      <span id="toolbar-time" class="toolbar-dim"></span>
+      <span id="toolbar-info" class="toolbar-dim"></span>
+      <button id="btn-power" class="toolbar-btn">PWR</button>
     </div>
 
     <!-- Chat area -->
@@ -45,7 +57,7 @@
       </div>
       <div id="statusbar-right">
         <span id="dnd-indicator" class="hidden">DND</span>
-        <span id="wifi-indicator">W</span>
+        <span id="wifi-indicator"></span>
         <span id="cpu-temp"></span>
         <span id="battery"></span>
       </div>
@@ -58,6 +70,9 @@
     const SCREENSAVER_TIMEOUT_SEC = {{ screensaver_timeout }};
     const SCREENSAVER_CYCLE_SEC = {{ screensaver_cycle }};
     const SHOW_TIME = {{ show_time | tojson }};
+    const LATITUDE = "{{ latitude }}";
+    const LONGITUDE = "{{ longitude }}";
+    const AMPM = {{ ampm | tojson }};
   </script>
   <script src="{{ url_for('static', filename='js/kiosk.js') }}"></script>
 </body>
