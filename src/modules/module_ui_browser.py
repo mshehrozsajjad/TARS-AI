@@ -185,6 +185,9 @@ class UIManagerBrowser(threading.Thread):
             'max': speechdelay,
         })
 
+    def set_mic_level(self, level):
+        self._emit('kiosk_mic_level', {'level': level})
+
     def set_tars_status(self, status):
         self._emit('kiosk_status', {'status': status})
 

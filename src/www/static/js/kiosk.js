@@ -28,9 +28,9 @@ const SCREENSAVER_TIMEOUT = 300000; // 5 minutes
 const MAX_MESSAGES = 50;
 
 // Mic level state
-let micActive = false;
 let micSilenceProgress = 0;
 let micSilenceMax = 1;
+let micLevel = 0;        // actual RMS level 0.0-1.0 from backend
 let micAnimFrame = null;
 
 // ── Mic level indicator ────────────────────────────────────────────────────
@@ -45,38 +45,42 @@ function drawMicLevel() {
   const h = $micCanvas.height;
   micCtx.clearRect(0, 0, w, h);
 
-  if (currentStatus !== 'LISTENING' && currentStatus !== 'TALKING') {
-    micAnimFrame = null;
-    return;
-  }
-
   const barCount = 40;
   const barWidth = w / barCount;
   const isListening = currentStatus === 'LISTENING';
   const isTalking = currentStatus === 'TALKING';
+  const isStandby = currentStatus === 'STANDBY';
+
+  if (!isListening && !isTalking && !isStandby) {
+    micAnimFrame = null;
+    return;
+  }
 
   for (let i = 0; i < barCount; i++) {
-    let level;
+    // Base level from actual mic RMS + per-bar variation for visual spread
+    const variation = 0.7 + 0.6 * Math.sin(i * 0.8 + Date.now() * 0.003);
+    let barLevel;
+
     if (isTalking) {
-      // Smooth wave animation when TARS is talking
-      level = 0.3 + 0.7 * Math.abs(Math.sin((Date.now() / 200) + i * 0.3));
-    } else if (micSilenceProgress === 0) {
-      // Speech detected — active random bars
-      level = 0.3 + Math.random() * 0.7;
+      barLevel = 0.3 + 0.7 * Math.abs(Math.sin((Date.now() / 200) + i * 0.3));
     } else {
-      // Silence — bars decay based on progress
-      const decay = 1 - (micSilenceProgress / Math.max(1, micSilenceMax));
-      level = Math.max(0.05, decay * (0.2 + Math.random() * 0.3));
+      barLevel = Math.min(1.0, micLevel * variation);
     }
 
-    const barH = level * h;
+    const barH = Math.max(1, barLevel * h);
     const y = (h - barH) / 2;
 
-    // Color: cyan when active, dims toward dark as silence grows
-    const alpha = isListening ? (micSilenceProgress === 0 ? 0.9 : 0.3 + 0.6 * (1 - micSilenceProgress / Math.max(1, micSilenceMax))) : 0.7;
-    micCtx.fillStyle = isTalking
-      ? `rgba(0, 255, 100, ${alpha})`
-      : `rgba(0, 255, 255, ${alpha})`;
+    let color;
+    if (isTalking) {
+      color = `rgba(0, 255, 100, 0.7)`;
+    } else if (isStandby) {
+      color = `rgba(0, 120, 120, ${0.3 + micLevel * 0.6})`;
+    } else {
+      // LISTENING — cyan, brighter with louder input
+      color = `rgba(0, 255, 255, ${0.3 + micLevel * 0.6})`;
+    }
+
+    micCtx.fillStyle = color;
     micCtx.fillRect(i * barWidth + 1, y, barWidth - 2, barH);
   }
 
@@ -229,7 +233,7 @@ function setStatus(status) {
   $toolbarStatus.textContent = status === 'THINKING' ? '[PROCESSING]' : '[ACTIVE]';
 
   // Mic level animation
-  if (status === 'LISTENING' || status === 'TALKING') {
+  if (status === 'LISTENING' || status === 'TALKING' || status === 'STANDBY') {
     micSilenceProgress = 0;
     startMicAnimation();
   } else {
@@ -289,6 +293,10 @@ socket.on('kiosk_silence', (data) => {
 
   // Ensure mic animation is running during listening
   if (currentStatus === 'LISTENING') startMicAnimation();
+});
+
+socket.on('kiosk_mic_level', (data) => {
+  micLevel = data.level || 0;
 });
 
 socket.on('kiosk_think', () => {

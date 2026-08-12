@@ -218,6 +218,9 @@ class STTManager:
         self._smart_turn_future = None  # pending inference Future
         self._smart_turn_last_buf_len = 0  # buffer size at last inference submission
 
+        # Normalized mic input level (0.0-1.0) for UI visualization
+        self._current_mic_level = 0.0
+
         # Post-reply listening: set True when waiting for user's next turn
         # after TARS finishes speaking.  Allows a longer pre-speech timeout.
         self._post_reply_listen = False
@@ -606,11 +609,17 @@ class STTManager:
     def _compute_rms_fast(self, data):
         """Compute RMS with amplification in one pass — no int16 round-trip."""
         if data.size == 0:
+            self._current_mic_level = 0.0
             return None
         flat = data.reshape(-1).astype(np.float64) * self.amp_gain
         if np.all(flat == 0):
+            self._current_mic_level = 0.0
             return None
-        return np.sqrt(np.mean(np.square(flat)))
+        rms = np.sqrt(np.mean(np.square(flat)))
+        # Normalize to 0.0-1.0 using silence threshold as reference
+        thresh = self.silence_threshold or 1.0
+        self._current_mic_level = min(1.0, rms / (thresh * 3.0))
+        return rms
 
     def play_wav(self, filename):
         try:
@@ -625,6 +634,8 @@ class STTManager:
     def _is_quiet(self, data):
         """Quick RMS silence gate check. Returns True if below threshold."""
         rms = self._compute_rms_fast(data)
+        if hasattr(self.ui_manager, 'set_mic_level'):
+            self.ui_manager.set_mic_level(self._current_mic_level)
         if rms is None:
             return True
         threshold = self.silence_threshold_margin or self.silence_threshold
@@ -1830,14 +1841,16 @@ class STTManager:
 
     def _get_progress_bar(self):
         if self._progress_bar_funcs is None:
-            bar_length = 10
-            show_console = self.ui_manager.__class__.__name__ not in ('UIManagerLite', 'UIManagerStub')
 
             def update(frames, max_frames):
                 self.ui_manager.silence(frames)
+                if hasattr(self.ui_manager, 'set_mic_level'):
+                    self.ui_manager.set_mic_level(self._current_mic_level)
 
             def clear():
                 self.ui_manager.silence(0)
+                if hasattr(self.ui_manager, 'set_mic_level'):
+                    self.ui_manager.set_mic_level(self._current_mic_level)
 
             self._progress_bar_funcs = (update, clear)
         return self._progress_bar_funcs
