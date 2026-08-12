@@ -1,0 +1,226 @@
+/* TARS Kiosk Display — matches the pygame terminal aesthetic */
+@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --primary: #00ffff;
+  --secondary: #00b4c8;
+  --accent: #007896;
+  --bg: #050f14;
+  --bg-panel: #0a1920;
+  --border: #00c8dc;
+  --text: #00f0c8;
+  --dim: #007878;
+  --label: #0096b4;
+  --user-color: #ffffff;
+  --bot-color: #64c8ff;
+  --system-color: #969696;
+  --user-pill: rgba(60, 45, 75, 0.5);
+  --user-pill-border: rgba(120, 90, 150, 0.6);
+  --bot-pill: rgba(20, 60, 90, 0.55);
+  --bot-pill-border: rgba(60, 130, 180, 0.6);
+  --system-pill: rgba(70, 70, 80, 0.4);
+  --system-pill-border: rgba(130, 130, 140, 0.5);
+  --status-standby: #007878;
+  --status-listening: #00c8ff;
+  --status-thinking: #ffb400;
+  --status-talking: #00ff64;
+  --status-booting: #ff6400;
+}
+
+html, body {
+  width: 100%; height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 16px;
+  overflow: hidden;
+  cursor: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Layout: toolbar + chat + statusbar */
+#main {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+}
+
+/* ── Top toolbar ── */
+#toolbar {
+  height: 28px;
+  background: rgba(5, 15, 20, 0.9);
+  border-bottom: 2px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.toolbar-id { color: var(--primary); font-size: 14px; font-weight: bold; }
+.toolbar-label { color: var(--label); font-size: 11px; }
+.toolbar-dim { color: var(--dim); font-size: 11px; margin-left: auto; }
+
+/* ── Chat area ── */
+#chat {
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+  background: rgba(5, 15, 20, 0.5);
+  border-left: 2px solid var(--border);
+  border-right: 2px solid var(--border);
+}
+
+#messages {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  scrollbar-width: none;
+}
+#messages::-webkit-scrollbar { display: none; }
+
+/* Message pills */
+.msg {
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid;
+  font-size: 15px;
+  line-height: 1.4;
+  word-wrap: break-word;
+}
+.msg .speaker {
+  font-weight: bold;
+  margin-right: 4px;
+}
+.msg-bot {
+  background: var(--bot-pill);
+  border-color: var(--bot-pill-border);
+}
+.msg-bot .speaker { color: var(--bot-color); }
+.msg-bot .text { color: var(--bot-color); }
+
+.msg-user {
+  background: var(--user-pill);
+  border-color: var(--user-pill-border);
+}
+.msg-user .speaker { color: var(--user-color); }
+.msg-user .text { color: var(--user-color); }
+
+.msg-system {
+  background: var(--system-pill);
+  border-color: var(--system-pill-border);
+  font-size: 13px;
+}
+.msg-system .speaker { color: var(--system-color); }
+.msg-system .text { color: var(--system-color); }
+
+/* ── Bottom status bar ── */
+#statusbar {
+  height: 32px;
+  background: rgba(5, 15, 20, 0.9);
+  border-top: 2px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 4px;
+  flex-shrink: 0;
+}
+
+#status-badge {
+  position: relative;
+  padding: 3px 12px;
+  border: 2px solid var(--status-standby);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.85);
+  overflow: hidden;
+}
+#silence-fill {
+  position: absolute;
+  top: 2px; left: 2px; bottom: 2px;
+  width: 0%;
+  border-radius: 4px;
+  transition: width 0.2s ease;
+}
+#status-text {
+  position: relative;
+  font-size: 14px;
+  font-weight: bold;
+  z-index: 1;
+}
+
+#statusbar-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+#dnd-indicator {
+  color: #ff4444;
+  font-weight: bold;
+}
+#wifi-indicator { color: var(--dim); }
+#cpu-temp { color: var(--secondary); }
+#battery { color: #00c864; font-weight: bold; }
+.battery-low { color: #ff4444 !important; }
+.battery-mid { color: #ffb400 !important; }
+
+/* ── Screensaver ── */
+.screensaver {
+  position: fixed;
+  top: 0; left: 0;
+  width: 100vw; height: 100vh;
+  z-index: 100;
+  background: #000;
+}
+#screensaver-canvas {
+  width: 100%; height: 100%;
+}
+#screensaver-clock {
+  position: absolute;
+  bottom: 20px;
+  width: 100%;
+  text-align: center;
+  color: var(--primary);
+  font-size: 32px;
+  font-weight: bold;
+  opacity: 0.7;
+}
+
+/* ── Overlay image ── */
+.overlay-image {
+  position: fixed;
+  top: 0; left: 0;
+  width: 100vw; height: 100vh;
+  z-index: 90;
+  background: rgba(0,0,0,0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.overlay-image img {
+  max-width: 90%;
+  max-height: 90%;
+}
+
+.hidden { display: none !important; }
+
+/* Status color variants */
+.status-BOOTING  { color: var(--status-booting); border-color: var(--status-booting); }
+.status-STANDBY  { color: var(--status-standby); border-color: var(--status-standby); }
+.status-LISTENING { color: var(--status-listening); border-color: var(--status-listening); }
+.status-THINKING { color: var(--status-thinking); border-color: var(--status-thinking); }
+.status-TALKING  { color: var(--status-talking); border-color: var(--status-talking); }
+
+/* Silence fill colors */
+.fill-LISTENING { background: rgba(0, 200, 255, 0.4); }
+.fill-STANDBY   { background: rgba(0, 120, 120, 0.3); }

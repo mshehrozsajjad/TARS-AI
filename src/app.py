@@ -93,12 +93,16 @@ if CONFIG['VISION']['enabled']:
 # === Conditional UI Import ===
 UI_AVAILABLE = False
 _use_lite_ui = False
+_use_browser_ui = CONFIG["UI"].get("app", "terminal").lower() == "browser"
 if CONFIG["UI"]["UI_enabled"]:
     caps = DEVICE_INFO.get("capabilities")
     if caps is None or caps.can_use_ui:
         _use_lite_ui = caps is not None and not caps.can_use_opengl
         try:
-            if _use_lite_ui:
+            if _use_browser_ui:
+                from modules.module_ui_browser import UIManagerBrowser as UIManager
+                queue_message("LOAD: Browser UI module enabled")
+            elif _use_lite_ui:
                 from modules.module_ui_lite import UIManagerLite as UIManager
                 queue_message("LOAD: Lite UI module enabled")
             else:
@@ -305,19 +309,8 @@ if __name__ == "__main__":
     temp = cpu_temp.get_temperature()
     queue_message(f"INFO: CPU Temperature: {temp:.1f}°C")
 
-    # === Initialize UI Manager ===
-    # In LiveKit mode, the LiveKit client manages its own Pygame display
-    if UI_AVAILABLE and show_ui and CONFIG["UI"]["UI_enabled"] and not LIVEKIT_MODE:
-        ui_manager = UIManager(
-            shutdown_event=shutdown_event,
-            battery_module=battery,
-            cpu_temp_module=cpu_temp
-        )
-        ui_manager.start()
-        queue_message(f"LOAD: {'Lite' if _use_lite_ui else 'Full'} UI manager started")
-        set_tars_state(TarsState.BOOTING)
-
     # === ChatUI Thread (starts early so webui is available during model loading) ===
+    # Must start before browser UI since it depends on Flask being ready.
     if CONFIG['ACCESS']['webui_enabled'] and CHATUI_AVAILABLE:
         chatui_port = CONFIG['ACCESS'].get('webui_port', 80)
         queue_message(f"LOAD: ChatUI starting on port {chatui_port}...")
@@ -327,6 +320,19 @@ if __name__ == "__main__":
             daemon=True
         )
         flask_thread.start()
+
+    # === Initialize UI Manager ===
+    # In LiveKit mode, the LiveKit client manages its own Pygame display
+    if UI_AVAILABLE and show_ui and CONFIG["UI"]["UI_enabled"] and not LIVEKIT_MODE:
+        ui_manager = UIManager(
+            shutdown_event=shutdown_event,
+            battery_module=battery,
+            cpu_temp_module=cpu_temp
+        )
+        ui_manager.start()
+        _ui_label = 'Browser' if _use_browser_ui else 'Lite' if _use_lite_ui else 'Full'
+        queue_message(f"LOAD: {_ui_label} UI manager started")
+        set_tars_state(TarsState.BOOTING)
     # === Ensure UI Manager is initialized ===
     if ui_manager is None:
         ui_manager = UIManagerStub(

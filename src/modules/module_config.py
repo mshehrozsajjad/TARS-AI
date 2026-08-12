@@ -1184,8 +1184,8 @@ CONFIG_METADATA = {
         },
         'app': {
             'depends_on': [{'field': 'UI_enabled', 'values': ['True', 'true']}],
-            'options': ['terminal', 'dashboard', 'clock', 'eyes', 'avatar'],
-            'description': 'What shows on the TARS display when it first starts up. "terminal" shows a scrolling chat-style interface where you can read the conversation in real time. "dashboard" shows a system status overview with battery, CPU, memory, and other stats. "clock" shows a large clean clock display — good if TARS lives on a desk. "eyes" shows an animated eye display that reacts to TARS speaking. "avatar" shows your character\'s animated sprite with blinking and talking animations. You can always switch between modes at runtime.'
+            'options': ['terminal', 'browser', 'dashboard', 'clock', 'eyes', 'avatar'],
+            'description': 'What shows on the TARS display when it first starts up. "terminal" shows a scrolling chat-style interface rendered with pygame (OpenGL). "browser" renders the UI in a Chromium kiosk window — much lower CPU usage than pygame, recommended for Pi4. "dashboard" shows a system status overview. "clock" shows a large clock display. "eyes" shows animated eyes that react to speech. "avatar" shows your character\'s animated sprite. You can always switch between modes at runtime (except browser, which requires a restart).'
         },
         'target_fps': {
             'depends_on': [{'field': 'UI_enabled', 'values': ['True', 'true']}],

@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>TARS</title>
+  <link rel="icon" href="{{ url_for('static', filename='imgs/favicon.ico') }}">
+  <link href="{{ url_for('static', filename='css/kiosk.css') }}" rel="stylesheet">
+  <script src="{{ url_for('static', filename='js/socket.io.js') }}"></script>
+</head>
+<body>
+  <!-- Screensaver overlay -->
+  <div id="screensaver" class="screensaver hidden">
+    <canvas id="screensaver-canvas"></canvas>
+    <div id="screensaver-clock"></div>
+  </div>
+
+  <!-- Overlay image -->
+  <div id="overlay-image" class="overlay-image hidden">
+    <img id="overlay-img" src="" alt="">
+  </div>
+
+  <!-- Main layout -->
+  <div id="main">
+    <!-- Top toolbar -->
+    <div id="toolbar">
+      <span class="toolbar-id">TERM-A1</span>
+      <span id="toolbar-status" class="toolbar-label">[ACTIVE]</span>
+      <span id="toolbar-time" class="toolbar-dim"></span>
+    </div>
+
+    <!-- Chat area -->
+    <div id="chat">
+      <div id="messages"></div>
+    </div>
+
+    <!-- Bottom status bar -->
+    <div id="statusbar">
+      <div id="status-badge">
+        <div id="silence-fill"></div>
+        <span id="status-text">BOOTING</span>
+      </div>
+      <div id="statusbar-right">
+        <span id="dnd-indicator" class="hidden">DND</span>
+        <span id="wifi-indicator">W</span>
+        <span id="cpu-temp"></span>
+        <span id="battery"></span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const CHAR_NAME = "{{ char_name }}";
+  </script>
+  <script src="{{ url_for('static', filename='js/kiosk.js') }}"></script>
+</body>
+</html>

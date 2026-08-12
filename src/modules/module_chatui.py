@@ -162,7 +162,7 @@ flask_app.secret_key = _get_secret_key()
 @flask_app.before_request
 def check_auth():
     # Public routes that don't require login
-    if request.path.startswith('/static') or request.path.startswith('/socket.io') or request.path in ('/login', '/emotion', '/start_talking', '/stop_talking') or not CONFIG['ACCESS'].get('webui_enabled', True):
+    if request.path.startswith('/static') or request.path.startswith('/socket.io') or request.path in ('/login', '/kiosk', '/emotion', '/start_talking', '/stop_talking') or not CONFIG['ACCESS'].get('webui_enabled', True):
         return
         
     # Check if user is logged in
@@ -388,6 +388,11 @@ def login():
 def logout():
     session.pop('logged_in', None)
     return redirect(url_for('login'))
+
+@flask_app.route('/kiosk')
+def kiosk():
+    """On-device kiosk display — no auth required (local only)."""
+    return render_template('kiosk.html', char_name=character_name)
 
 @flask_app.route('/holo')
 def holo():

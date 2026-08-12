@@ -34,6 +34,22 @@
 
 ---
 
+## Face Registration
+
+To enroll a face for recognition, log into the web UI at `http://<pi-ip>`, open the browser console (F12), and run:
+
+```javascript
+fetch('/api/faces/train', {
+  method: 'POST',
+  headers: {'Content-Type': 'application/json'},
+  body: JSON.stringify({name: 'YourName', samples: 10})
+}).then(r => r.json()).then(console.log)
+```
+
+Make sure you are facing the camera when you trigger it. It captures 10 frames and averages the face embeddings.
+
+---
+
 ## 📜 License
 
 This project is licensed under **Creative Commons Attribution-NonCommercial 4.0 International (CC-BY-NC 4.0)**.
