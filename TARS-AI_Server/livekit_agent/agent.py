@@ -14,6 +14,7 @@ Run:
     python agent.py start        # production
 """
 
+import asyncio
 import logging
 import os
 import json
@@ -83,6 +84,19 @@ class TarsAgent(Agent):
     def __init__(self) -> None:
         super().__init__(instructions=TARS_INSTRUCTIONS)
 
+    # ── RPC helpers ───────────────────────────────────────────────
+
+    async def _fire_rpc(self, context: RunContext, method: str, payload: str):
+        """Fire-and-forget RPC to Pi — don't block the agent pipeline."""
+        try:
+            await context.session.room_io.room.local_participant.perform_rpc(
+                destination_identity="tars-pi",
+                method=method,
+                payload=payload,
+            )
+        except Exception as e:
+            logger.warning("RPC %s failed: %s", method, e)
+
     # ── Physical action tools (RPC to Pi) ────────────────────────
 
     @function_tool()
@@ -102,15 +116,8 @@ class TarsAgent(Agent):
             speed: Movement speed — slow or fast (applies to turning only)
         """
         payload = json.dumps({"name": direction, "speed": speed})
-        try:
-            response = await context.session.room_io.room.local_participant.perform_rpc(
-                destination_identity="tars-pi",
-                method="move",
-                payload=payload,
-            )
-            return response
-        except Exception as e:
-            return json.dumps({"status": "error", "message": str(e)})
+        asyncio.create_task(self._fire_rpc(context, "move", payload))
+        return json.dumps({"status": "ok", "movement": direction})
 
     @function_tool()
     async def gesture(
@@ -124,15 +131,8 @@ class TarsAgent(Agent):
             name: Gesture name. Must be one of: nod, lean, recoil, rock, bounce, shrug, wave, settle
         """
         payload = json.dumps({"name": name})
-        try:
-            response = await context.session.room_io.room.local_participant.perform_rpc(
-                destination_identity="tars-pi",
-                method="gesture",
-                payload=payload,
-            )
-            return response
-        except Exception as e:
-            return json.dumps({"status": "error", "message": str(e)})
+        asyncio.create_task(self._fire_rpc(context, "gesture", payload))
+        return json.dumps({"status": "ok", "gesture": name})
 
     @function_tool()
     async def set_emotion(
@@ -148,15 +148,8 @@ class TarsAgent(Agent):
                      annoyed, curious
         """
         payload = json.dumps({"emotion": emotion})
-        try:
-            response = await context.session.room_io.room.local_participant.perform_rpc(
-                destination_identity="tars-pi",
-                method="set_emotion",
-                payload=payload,
-            )
-            return response
-        except Exception as e:
-            return json.dumps({"status": "error", "message": str(e)})
+        asyncio.create_task(self._fire_rpc(context, "set_emotion", payload))
+        return json.dumps({"status": "ok", "emotion": emotion})
 
     @function_tool()
     async def get_battery_status(
@@ -180,15 +173,9 @@ class TarsAgent(Agent):
         context: RunContext,
     ) -> str:
         """Disable all servos to relax TARS body. Use when asked to rest or relax."""
-        try:
-            response = await context.session.room_io.room.local_participant.perform_rpc(
-                destination_identity="tars-pi",
-                method="disable_servos",
-                payload="{}",
-            )
-            return response
-        except Exception as e:
-            return json.dumps({"status": "error", "message": str(e)})
+        payload = "{}"
+        asyncio.create_task(self._fire_rpc(context, "disable_servos", payload))
+        return json.dumps({"status": "ok"})
 
     # ── Virtual tools (run directly on agent) ────────────────────
 
