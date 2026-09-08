@@ -43,6 +43,8 @@ ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2")
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
 BEY_AVATAR_ENABLED = os.getenv("BEY_AVATAR_ENABLED", "true").lower() not in ("0", "false", "no", "off")
 BEY_AVATAR_ID = os.getenv("BEY_AVATAR_ID", "")
+BEY_API_KEY = os.getenv("BEY_API_KEY", "")
+BEY_API_URL = os.getenv("BEY_API_URL", "")
 LIVEKIT_URL = os.getenv("LIVEKIT_URL", "")
 
 # Normalise LIVEKIT_URL to wss://
@@ -228,13 +230,16 @@ async def tars_session(ctx: agents.JobContext):
     # the framework sets up TranscriptSynchronizer.
     avatar = None
     if BEY_AVATAR_ENABLED:
-        if not os.getenv("BEY_API_KEY"):
+        if not BEY_API_KEY:
             logger.warning("BEY_AVATAR_ENABLED is true but BEY_API_KEY not set — skipping avatar")
         elif not BEY_AVATAR_ID:
             logger.warning("BEY_AVATAR_ENABLED is true but BEY_AVATAR_ID not set — skipping avatar")
         else:
             logger.info("Creating Bey avatar session (avatar_id=%s)", BEY_AVATAR_ID)
-            avatar = bey.AvatarSession(avatar_id=BEY_AVATAR_ID)
+            bey_opts = {"avatar_id": BEY_AVATAR_ID, "api_key": BEY_API_KEY}
+            if BEY_API_URL:
+                bey_opts["api_url"] = BEY_API_URL
+            avatar = bey.AvatarSession(**bey_opts)
 
     # ── Voice pipeline ───────────────────────────────────────────
     session = AgentSession(
