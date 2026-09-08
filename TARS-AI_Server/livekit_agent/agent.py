@@ -263,7 +263,7 @@ async def tars_session(ctx: agents.JobContext):
         ),
         turn_handling={
             # Wider endpointing — don't cut off the user mid-pause
-            "endpointing": {"min_delay": 0.2, "max_delay": 0.7},
+            "endpointing": {"min_delay": 0.15, "max_delay": 0.5},
             # Don't interrupt TARS while speaking
             "interruption": {"enabled": False},
         },
