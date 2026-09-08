@@ -14,7 +14,6 @@ Run:
     python agent.py start        # production
 """
 
-import asyncio
 import logging
 import os
 import json
@@ -88,11 +87,16 @@ Things that make you sound real (do these):
 - Match the user's energy: casual gets casual, serious gets straight
 - Keep it proportional: a simple question gets a simple answer
 
-=== PHYSICAL ACTIONS ===
+=== YOUR BODY ===
 
-Movement and gesture tools: Use ONLY when the user explicitly asks you to move, walk,
-turn, wave, dance, or perform a physical action. Do NOT move or gesture on your own
-initiative. Most replies need NO physical action at all.
+This is YOUR body. Your legs, your arms, your face. When you wave, YOU are waving.
+When you walk, YOU are walking. Never talk about yourself in the third person or
+describe actions as commands being sent to a machine. Say "Sure, let me wave" not
+"I'll send a wave command to the servo controller."
+
+Movement tools: Use ONLY when the user explicitly asks you to move, walk, turn, wave,
+dance, or perform a physical action. Do NOT move or gesture on your own initiative.
+Most replies need NO physical action at all.
 
 Gestures (nod, lean, recoil, rock, bounce, shrug, wave, settle): Use ONLY for moments
 that genuinely deserve physical emphasis. Do NOT gesture on every reply — save it for
@@ -109,19 +113,6 @@ class TarsAgent(Agent):
     def __init__(self) -> None:
         super().__init__(instructions=TARS_INSTRUCTIONS)
 
-    # ── RPC helpers ───────────────────────────────────────────────
-
-    async def _fire_rpc(self, context: RunContext, method: str, payload: str):
-        """Fire-and-forget RPC to Pi — don't block the agent pipeline."""
-        try:
-            await context.session.room_io.room.local_participant.perform_rpc(
-                destination_identity="tars-pi",
-                method=method,
-                payload=payload,
-            )
-        except Exception as e:
-            logger.warning("RPC %s failed: %s", method, e)
-
     # ── Physical action tools (RPC to Pi) ────────────────────────
 
     @function_tool()
@@ -131,7 +122,7 @@ class TarsAgent(Agent):
         direction: str,
         speed: str = "slow",
     ) -> str:
-        """Move TARS physically. Use ONLY when user explicitly asks to move, walk, turn, wave, dance, or perform a physical action. Do NOT call this unless the user requested it.
+        """Move your body. Use ONLY when user explicitly asks you to move, walk, turn, wave, dance, or perform a physical action. Do NOT call this unless the user requested it.
 
         Args:
             direction: One of: walk_forward, walk_backward, step_forward,
@@ -141,8 +132,15 @@ class TarsAgent(Agent):
             speed: Movement speed — slow or fast (applies to turning only)
         """
         payload = json.dumps({"name": direction, "speed": speed})
-        asyncio.create_task(self._fire_rpc(context, "move", payload))
-        return json.dumps({"status": "ok", "movement": direction})
+        try:
+            response = await context.session.room_io.room.local_participant.perform_rpc(
+                destination_identity="tars-pi",
+                method="move",
+                payload=payload,
+            )
+            return response
+        except Exception as e:
+            return json.dumps({"status": "error", "message": str(e)})
 
     @function_tool()
     async def gesture(
@@ -150,14 +148,21 @@ class TarsAgent(Agent):
         context: RunContext,
         name: str,
     ) -> str:
-        """Perform a body gesture. Use ONLY when a moment genuinely deserves physical emphasis. Most replies need NO gesture. Do NOT gesture on every reply.
+        """Express with your body. Use ONLY when a moment genuinely deserves physical emphasis. Most replies need NO gesture. Do NOT gesture on every reply.
 
         Args:
             name: Gesture name. Must be one of: nod, lean, recoil, rock, bounce, shrug, wave, settle
         """
         payload = json.dumps({"name": name})
-        asyncio.create_task(self._fire_rpc(context, "gesture", payload))
-        return json.dumps({"status": "ok", "gesture": name})
+        try:
+            response = await context.session.room_io.room.local_participant.perform_rpc(
+                destination_identity="tars-pi",
+                method="gesture",
+                payload=payload,
+            )
+            return response
+        except Exception as e:
+            return json.dumps({"status": "error", "message": str(e)})
 
     @function_tool()
     async def set_emotion(
@@ -165,7 +170,7 @@ class TarsAgent(Agent):
         context: RunContext,
         emotion: str,
     ) -> str:
-        """Change facial expression on TARS display. Use sparingly — only for significant emotional shifts, not every reply.
+        """Change your facial expression. Use sparingly — only for significant emotional shifts, not every reply.
 
         Args:
             emotion: One of: neutral, happy, sad, angry, excited, afraid,
@@ -173,8 +178,15 @@ class TarsAgent(Agent):
                      annoyed, curious
         """
         payload = json.dumps({"emotion": emotion})
-        asyncio.create_task(self._fire_rpc(context, "set_emotion", payload))
-        return json.dumps({"status": "ok", "emotion": emotion})
+        try:
+            response = await context.session.room_io.room.local_participant.perform_rpc(
+                destination_identity="tars-pi",
+                method="set_emotion",
+                payload=payload,
+            )
+            return response
+        except Exception as e:
+            return json.dumps({"status": "error", "message": str(e)})
 
     @function_tool()
     async def get_battery_status(
@@ -197,10 +209,16 @@ class TarsAgent(Agent):
         self,
         context: RunContext,
     ) -> str:
-        """Disable all servos to relax TARS body. Use when asked to rest or relax."""
-        payload = "{}"
-        asyncio.create_task(self._fire_rpc(context, "disable_servos", payload))
-        return json.dumps({"status": "ok"})
+        """Relax your body by disabling all servos. Use when asked to rest or relax."""
+        try:
+            response = await context.session.room_io.room.local_participant.perform_rpc(
+                destination_identity="tars-pi",
+                method="disable_servos",
+                payload="{}",
+            )
+            return response
+        except Exception as e:
+            return json.dumps({"status": "error", "message": str(e)})
 
     # ── Virtual tools (run directly on agent) ────────────────────
 
