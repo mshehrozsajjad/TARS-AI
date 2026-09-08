@@ -286,6 +286,7 @@ def _start_display_server(livekit_url, room_name, port=8888):
                 "--check-for-update-interval=31536000",
                 "--disable-features=TranslateUI",
                 "--no-first-run",
+                "--password-store=basic",
                 f"http://127.0.0.1:{port}/livekit-display",
             ],
             stdout=subprocess.DEVNULL,
