@@ -352,7 +352,7 @@ class WakeWordGate:
             return
 
         # Mute mic on start — agent hears nothing until wake word
-        asyncio.ensure_future(self._set_mic_muted(True))
+        self._set_mic_muted(True)
         queue_message("WAKEWORD: Mic muted — listening for wake word locally")
 
         # Start async detection loop (runs in the LiveKit event loop)
@@ -366,13 +366,13 @@ class WakeWordGate:
         """Called when agent audio is received — resets silence timer."""
         self._last_agent_audio = time.monotonic()
 
-    async def _set_mic_muted(self, muted):
+    def _set_mic_muted(self, muted):
         """Mute or unmute the published mic track."""
         try:
             if muted:
-                await self._mic_track.mute()
+                self._mic_track.mute()
             else:
-                await self._mic_track.unmute()
+                self._mic_track.unmute()
             self._mic_is_muted = muted
         except Exception as e:
             queue_message(f"WAKEWORD: Mute toggle error — {e}")
@@ -454,7 +454,7 @@ class WakeWordGate:
                 elapsed = time.monotonic() - self._last_agent_audio
                 if elapsed > self._silence_timeout:
                     logging.debug("WAKEWORD: Silence timeout — re-muting mic")
-                    await self._set_mic_muted(True)
+                    self._set_mic_muted(True)
                     set_tars_state(TarsState.STANDBY)
                     self._oww.reset()
                 continue
@@ -472,7 +472,7 @@ class WakeWordGate:
                     self._oww.reset()
                     set_tars_state(TarsState.LISTENING)
                     self._last_agent_audio = time.monotonic()
-                    await self._set_mic_muted(False)
+                    self._set_mic_muted(False)
                     break
 
         queue_message("WAKEWORD: Detection stopped")
