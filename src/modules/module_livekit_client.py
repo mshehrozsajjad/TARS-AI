@@ -340,6 +340,7 @@ class WakeWordGate:
         self._last_agent_audio = 0.0
         self._mic_is_muted = False
         self._thread = None
+        self._pa_stream = None  # pyaudio stream ref for cleanup
 
     def start(self, mic_track, room):
         """Start wake word detection. Mutes the mic track immediately."""
@@ -361,6 +362,12 @@ class WakeWordGate:
     def stop(self):
         """Stop wake word detection and unmute mic."""
         self._stop_event.set()
+        # Close the pyaudio stream to unblock the blocking read()
+        if self._pa_stream is not None:
+            try:
+                self._pa_stream.close()
+            except Exception:
+                pass
         if self._thread:
             self._thread.join(timeout=3)
 
@@ -398,26 +405,46 @@ class WakeWordGate:
                 pass
             return
 
-        # Load model — supports pretrained names ("hey_mycroft") or file paths
-        is_file = self._model_path.endswith(".onnx") or os.path.isabs(self._model_path)
-        model_name = os.path.splitext(os.path.basename(self._model_path))[0] if is_file else self._model_path
+        # Resolve model path — file path or pretrained name
+        model_path = self._model_path
+        if os.path.isfile(model_path):
+            model_paths = [model_path]
+        else:
+            # Try to match against pretrained models by name
+            import openwakeword
+            pretrained = openwakeword.get_pretrained_model_paths()
+            match = next(
+                (p for p in pretrained
+                 if os.path.basename(p).replace(".onnx", "").replace(".tflite", "") == model_path
+                 or os.path.basename(p) == model_path),
+                None,
+            )
+            if match:
+                model_paths = [match]
+            else:
+                available = [os.path.basename(p).replace(".onnx", "") for p in pretrained]
+                queue_message(
+                    f"WAKEWORD: Model '{model_path}' not found. "
+                    f"Available pretrained: {available}"
+                )
+                try:
+                    loop = asyncio.get_event_loop()
+                    loop.call_soon_threadsafe(
+                        lambda: asyncio.ensure_future(self._set_mic_muted(False))
+                    )
+                except Exception:
+                    pass
+                return
+
+        model_name = os.path.splitext(os.path.basename(model_paths[0]))[0]
         try:
             params = inspect.signature(OWWModel.__init__).parameters
-            if is_file:
-                if "wakeword_models" in params:
-                    oww = OWWModel(wakeword_models=[self._model_path], inference_framework="onnx")
-                else:
-                    oww = OWWModel(wakeword_model_paths=[self._model_path])
+            if "wakeword_models" in params:
+                oww = OWWModel(wakeword_models=model_paths, inference_framework="onnx")
             else:
-                # Pretrained model — let openWakeWord find it by name
-                oww = OWWModel(
-                    wakeword_models=[self._model_path],
-                    inference_framework="onnx",
-                ) if "wakeword_models" in params else OWWModel(
-                    wakeword_model_paths=[self._model_path],
-                )
+                oww = OWWModel(wakeword_model_paths=model_paths)
         except Exception as e:
-            queue_message(f"WAKEWORD: Failed to load model '{self._model_path}' — {e}")
+            queue_message(f"WAKEWORD: Failed to load model '{model_name}' — {e}")
             try:
                 loop = asyncio.get_event_loop()
                 loop.call_soon_threadsafe(
@@ -440,6 +467,7 @@ class WakeWordGate:
                 input=True,
                 frames_per_buffer=1280,  # 80ms chunks at 16kHz
             )
+            self._pa_stream = stream  # store ref so stop() can close it
         except Exception as e:
             queue_message(f"WAKEWORD: Could not open mic stream — {e}")
             try:
@@ -459,6 +487,9 @@ class WakeWordGate:
                 # Read audio chunk
                 try:
                     audio_bytes = stream.read(1280, exception_on_overflow=False)
+                except OSError:
+                    # Stream closed by stop() — exit cleanly
+                    break
                 except Exception:
                     continue
 
