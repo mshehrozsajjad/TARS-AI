@@ -413,10 +413,12 @@ class WakeWordGate:
             # Try to match against pretrained models by name
             import openwakeword
             pretrained = openwakeword.get_pretrained_model_paths()
+            def _name_matches(filepath, query):
+                basename = os.path.basename(filepath).replace(".onnx", "").replace(".tflite", "")
+                return basename == query or basename.startswith(query + "_v")
+
             match = next(
-                (p for p in pretrained
-                 if os.path.basename(p).replace(".onnx", "").replace(".tflite", "") == model_path
-                 or os.path.basename(p) == model_path),
+                (p for p in pretrained if _name_matches(p, model_path)),
                 None,
             )
             if match:
@@ -1153,14 +1155,17 @@ def start_livekit_client(ui_manager=None, shutdown_event=None):
 
 
 def stop_livekit_client():
-    """Stop the global client (if running)."""
+    """Stop the global client (if running).
+
+    The LiveKit client runs in its own asyncio loop on a daemon thread.
+    Disconnect is handled by the shutdown_event in that loop's _wait_shutdown.
+    This function just ensures the wake word gate is stopped and cleans up
+    the reference — the daemon thread exits when the process exits.
+    """
     global _client_instance
     with _client_lock:
         if _client_instance is not None:
-            try:
-                loop = asyncio.new_event_loop()
-                loop.run_until_complete(_client_instance.disconnect())
-                loop.close()
-            except Exception as e:
-                queue_message(f"LIVEKIT: Error stopping client — {e}")
+            # Stop wake word gate (blocks on pyaudio stream)
+            if _client_instance._wake_word_gate is not None:
+                _client_instance._wake_word_gate.stop()
             _client_instance = None
