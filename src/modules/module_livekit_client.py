@@ -369,9 +369,10 @@ class WakeWordGate:
     async def _set_mic_muted(self, muted):
         """Mute or unmute the published mic track."""
         try:
-            await self._room.local_participant.set_track_muted(
-                self._mic_track, muted
-            )
+            if muted:
+                await self._mic_track.mute()
+            else:
+                await self._mic_track.unmute()
             self._mic_is_muted = muted
         except Exception as e:
             queue_message(f"WAKEWORD: Mute toggle error — {e}")
@@ -452,14 +453,10 @@ class WakeWordGate:
             if not self._mic_is_muted:
                 elapsed = time.monotonic() - self._last_agent_audio
                 if elapsed > self._silence_timeout:
-                    queue_message(
-                        f"WAKEWORD: Silence timeout ({self._silence_timeout}s) "
-                        "— re-muting mic"
-                    )
+                    logging.debug("WAKEWORD: Silence timeout — re-muting mic")
                     await self._set_mic_muted(True)
                     set_tars_state(TarsState.STANDBY)
                     self._oww.reset()
-                    queue_message(f"WAKEWORD: Listening for '{self._model_name}'...")
                 continue
 
             # Feed audio to openWakeWord
