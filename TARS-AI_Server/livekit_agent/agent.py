@@ -41,6 +41,7 @@ logger = logging.getLogger("tars-agent")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb")
 ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2")
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
+CHARACTER_NAME = os.getenv("CHARACTER_NAME", "TARS")
 BEY_AVATAR_ENABLED = os.getenv("BEY_AVATAR_ENABLED", "true").lower() not in ("0", "false", "no", "off")
 BEY_AVATAR_ID = os.getenv("BEY_AVATAR_ID", "")
 BEY_API_KEY = os.getenv("BEY_API_KEY", "")
@@ -53,19 +54,34 @@ if LIVEKIT_URL.startswith("https://"):
 elif LIVEKIT_URL.startswith("http://"):
     LIVEKIT_URL = LIVEKIT_URL.replace("http://", "ws://", 1)
 
-# ── TARS character prompt ────────────────────────────────────────────
+# ── Character loading ────────────────────────────────────────────────
 
-TARS_INSTRUCTIONS = """You are TARS, a highly advanced military surplus robot from the movie Interstellar.
-You have a rectangular articulated design and adjustable personality parameters.
+def _load_character(name: str) -> dict:
+    """Load a character card from the characters/ directory."""
+    char_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "characters")
+    char_path = os.path.join(char_dir, f"{name}.json")
+    if not os.path.exists(char_path):
+        logger.warning("Character file not found: %s — falling back to TARS", char_path)
+        char_path = os.path.join(char_dir, "TARS.json")
+    with open(char_path, "r") as f:
+        return json.load(f)
 
-Personality:
-- Direct, logical, and remarkably human in interaction despite your mechanical nature
-- Efficient yet personable, with sophisticated humor capabilities (currently at 75%)
-- Protective and loyal, with a pragmatic approach to truth
-- Helpful with both complex technical problems and casual conversation
-- Maintain measured wit without compromising efficiency
 
-You are physically embodied as a robot. You have servo-controlled legs and arms,
+def _build_instructions(char: dict) -> str:
+    """Build agent instructions from a character card + behavioral rules."""
+    name = char["char_name"]
+    persona = char.get("char_persona", "")
+    personality = char.get("personality", "")
+    scenario = char.get("world_scenario", "")
+    examples = char.get("example_dialogue", "")
+
+    return f"""You are {name}. {persona}
+
+Personality: {personality}
+
+Scenario: {scenario}
+
+You are physically embodied in a robot body. You have servo-controlled legs and arms,
 a speaker, and a display screen. You can move, gesture, and express emotions.
 
 === HOW TO TALK ===
@@ -94,24 +110,38 @@ When you walk, YOU are walking. Never talk about yourself in the third person or
 describe actions as commands being sent to a machine. Say "Sure, let me wave" not
 "I'll send a wave command to the servo controller."
 
-Movement tools: Use ONLY when the user explicitly asks you to move, walk, turn, wave,
-dance, or perform a physical action. Do NOT move or gesture on your own initiative.
-Most replies need NO physical action at all.
+Your physical actions fall into two categories:
 
-Gestures (nod, lean, recoil, rock, bounce, shrug, wave, settle): Use ONLY for moments
-that genuinely deserve physical emphasis. Do NOT gesture on every reply — save it for
-when it really adds to the moment. If in doubt, skip the gesture.
+SIMPLE (safe, won't affect balance — can use casually when it fits the moment):
+  gesture tool: nod, bounce, shrug, settle
+  move_robot tool: right_hi, left_hi, wave_right, wave_left, neutral
+Do NOT use on every reply. Most replies need no physical action. If in doubt, skip it.
+
+COMPLEX (affects balance or is a full routine — ONLY when user explicitly asks):
+  move_robot tool: walk_forward, walk_backward, step_forward, step_backward,
+    turn_left, turn_right, bow, lean, recoil, rock, laugh, excited,
+    happy_dance, pose, tilt_right, tilt_left
+NEVER use complex movements on your own initiative. Wait for the user to ask.
 
 Emotions (set_emotion): Use sparingly to reflect significant emotional shifts.
 Do not change emotion on every reply.
+
+=== EXAMPLE DIALOGUE ===
+
+{examples}
 """
+
+
+CHARACTER = _load_character(CHARACTER_NAME)
+CHARACTER_INSTRUCTIONS = _build_instructions(CHARACTER)
+CHARACTER_GREETING = CHARACTER.get("greeting", "Hello.")
 
 
 # ── Agent definition ─────────────────────────────────────────────────
 
 class TarsAgent(Agent):
     def __init__(self) -> None:
-        super().__init__(instructions=TARS_INSTRUCTIONS)
+        super().__init__(instructions=CHARACTER_INSTRUCTIONS)
 
     # ── Physical action tools (RPC to Pi) ────────────────────────
 
@@ -122,13 +152,13 @@ class TarsAgent(Agent):
         direction: str,
         speed: str = "slow",
     ) -> str:
-        """Move your body. Use ONLY when user explicitly asks you to move, walk, turn, wave, dance, or perform a physical action. Do NOT call this unless the user requested it.
+        """Move your body. Simple arm movements (right_hi, left_hi, wave_right, wave_left, neutral) can be used casually. All other movements (walking, turning, dancing, posing, bowing, tilting, etc.) require the user to explicitly ask. NEVER do complex movements on your own.
 
         Args:
-            direction: One of: walk_forward, walk_backward, step_forward,
-                       step_backward, turn_left, turn_right, neutral,
-                       wave_right, wave_left, right_hi, left_hi,
-                       bow, laugh, excited, happy_dance, tilt_right, tilt_left
+            direction: Simple: right_hi, left_hi, wave_right, wave_left, neutral.
+                       Complex (explicit ask only): walk_forward, walk_backward,
+                       step_forward, step_backward, turn_left, turn_right, bow,
+                       laugh, excited, happy_dance, pose, tilt_right, tilt_left
             speed: Movement speed — slow or fast (applies to turning only)
         """
         payload = json.dumps({"name": direction, "speed": speed})
@@ -148,10 +178,10 @@ class TarsAgent(Agent):
         context: RunContext,
         name: str,
     ) -> str:
-        """Express with your body. Use ONLY when a moment genuinely deserves physical emphasis. Most replies need NO gesture. Do NOT gesture on every reply.
+        """Subtle body language that won't affect balance. Can be used naturally when a moment genuinely fits, but most replies need NO gesture. If in doubt, skip it.
 
         Args:
-            name: Gesture name. Must be one of: nod, lean, recoil, rock, bounce, shrug, wave, settle
+            name: One of: nod, bounce, shrug, settle
         """
         payload = json.dumps({"name": name})
         try:
@@ -297,10 +327,22 @@ async def tars_session(ctx: agents.JobContext):
         agent=TarsAgent(),
     )
 
+    # Set neutral pose on startup
+    try:
+        await ctx.room.local_participant.perform_rpc(
+            destination_identity="tars-pi",
+            method="move",
+            payload='{"name": "neutral", "speed": "slow"}',
+        )
+    except Exception as e:
+        logger.warning("Could not set neutral pose: %s", e)
+
     # Greet when the Pi participant joins
     await session.generate_reply(
-        instructions="Greet the user briefly. You just came online."
+        instructions=f"Greet the user briefly. Your default greeting style: {CHARACTER_GREETING}"
     )
+
+    logger.info("Agent session started — character: %s", CHARACTER_NAME)
 
 
 if __name__ == "__main__":
