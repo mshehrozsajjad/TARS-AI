@@ -99,6 +99,17 @@ camera_height = 480
 play_local_audio = True
 # Video display mode: browser (Chromium, heavier but smooth) | pygame (lightweight, lower quality)
 display_mode = browser
+# Wake word: enable local wake word detection (mic stays muted until wake word heard)
+# Requires: pip install "livekit-wakeword[listener]"
+# When disabled, mic is always live (agent hears everything)
+wake_word_enabled = False
+# Wake word model file — .onnx file in src/ or absolute path
+# Use "hey_livekit.onnx" for default, or train your own with livekit-wakeword
+wake_word_model = hey_livekit.onnx
+# Detection threshold (0.0-1.0) — lower = more sensitive, higher = fewer false positives
+wake_word_threshold = 0.5
+# Seconds of silence after last agent speech before re-muting mic (waiting for wake word again)
+wake_word_silence_timeout = 8.0
 
 [STT]
 # Spoken language (use openai stt_processor for non-English)

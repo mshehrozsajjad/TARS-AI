@@ -313,6 +313,175 @@ def _stop_display():
     _stop_pygame_display()
 
 
+# ── Wake word gate (hybrid: local detection + mic mute/unmute) ──────
+
+class WakeWordGate:
+    """Local wake word detection that mutes/unmutes the LiveKit mic track.
+
+    When enabled, the mic track starts muted. Audio is captured locally
+    and fed to a livekit-wakeword ONNX model. On detection, the mic is
+    unmuted so the cloud agent hears speech. After a silence timeout
+    (no agent speech for N seconds), the mic is re-muted.
+
+    Room and avatar stay connected the entire time — only the mic
+    toggles. Deepgram is not billed while muted.
+    """
+
+    def __init__(self, model_path, threshold=0.5, silence_timeout=8.0):
+        self._model_path = model_path
+        self._threshold = threshold
+        self._silence_timeout = silence_timeout
+        self._mic_track = None
+        self._mic_publication = None
+        self._listening = False
+        self._stop_event = threading.Event()
+        self._last_agent_audio = 0.0
+        self._thread = None
+
+    def start(self, mic_track, room):
+        """Start wake word detection. Mutes the mic track immediately."""
+        self._mic_track = mic_track
+        self._room = room
+        self._listening = True
+        self._stop_event.clear()
+
+        # Mute mic on start — agent hears nothing until wake word
+        asyncio.ensure_future(self._set_mic_muted(True))
+        queue_message("WAKEWORD: Mic muted — listening for wake word locally")
+
+        self._thread = threading.Thread(
+            target=self._detection_loop,
+            name="WakeWordGate",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self):
+        """Stop wake word detection and unmute mic."""
+        self._stop_event.set()
+        self._listening = False
+        if self._thread:
+            self._thread.join(timeout=3)
+
+    def notify_agent_audio(self):
+        """Called when agent audio is received — resets silence timer."""
+        self._last_agent_audio = time.monotonic()
+
+    async def _set_mic_muted(self, muted):
+        """Mute or unmute the published mic track."""
+        try:
+            if muted:
+                await self._room.local_participant.set_track_muted(
+                    self._mic_track, True
+                )
+            else:
+                await self._room.local_participant.set_track_muted(
+                    self._mic_track, False
+                )
+        except Exception as e:
+            queue_message(f"WAKEWORD: Mute toggle error — {e}")
+
+    def _unmute_mic(self):
+        """Unmute mic from sync context."""
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(self._set_mic_muted(False))
+            else:
+                loop.run_until_complete(self._set_mic_muted(False))
+        except Exception:
+            pass
+
+    def _mute_mic(self):
+        """Mute mic from sync context."""
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(self._set_mic_muted(True))
+            else:
+                loop.run_until_complete(self._set_mic_muted(True))
+        except Exception:
+            pass
+
+    def _detection_loop(self):
+        """Main wake word detection loop — runs in a background thread."""
+        try:
+            from livekit.wakeword import WakeWordModel, WakeWordListener
+        except ImportError:
+            queue_message(
+                "WAKEWORD: livekit-wakeword not installed. "
+                "Install with: pip install 'livekit-wakeword[listener]'"
+            )
+            # Fall back to always-unmuted (no wake word gating)
+            self._unmute_mic()
+            return
+
+        try:
+            model = WakeWordModel(models=[self._model_path])
+        except Exception as e:
+            queue_message(f"WAKEWORD: Failed to load model '{self._model_path}' — {e}")
+            self._unmute_mic()
+            return
+
+        model_name = os.path.splitext(os.path.basename(self._model_path))[0]
+        queue_message(f"WAKEWORD: Model loaded — '{model_name}', threshold={self._threshold}")
+
+        import asyncio as _aio
+
+        loop = _aio.new_event_loop()
+
+        async def _run_listener():
+            async with WakeWordListener(
+                model,
+                threshold=self._threshold,
+                debounce=2.0,
+            ) as listener:
+                while not self._stop_event.is_set():
+                    # Wait for wake word detection
+                    queue_message(f"WAKEWORD: Waiting for '{model_name}'...")
+                    try:
+                        detection = await _aio.wait_for(
+                            listener.wait_for_detection(),
+                            timeout=1.0,
+                        )
+                    except _aio.TimeoutError:
+                        continue
+                    except Exception as e:
+                        queue_message(f"WAKEWORD: Detection error — {e}")
+                        continue
+
+                    queue_message(
+                        f"WAKEWORD: Detected '{detection.name}' "
+                        f"(confidence={detection.confidence:.2f}) — unmuting mic"
+                    )
+                    set_tars_state(TarsState.LISTENING)
+                    await self._set_mic_muted(False)
+                    self._last_agent_audio = time.monotonic()
+
+                    # Keep mic open until silence timeout
+                    while not self._stop_event.is_set():
+                        await _aio.sleep(0.5)
+                        elapsed = time.monotonic() - self._last_agent_audio
+                        if elapsed > self._silence_timeout:
+                            queue_message(
+                                f"WAKEWORD: Silence timeout ({self._silence_timeout}s) "
+                                "— re-muting mic"
+                            )
+                            await self._set_mic_muted(True)
+                            set_tars_state(TarsState.STANDBY)
+                            break
+
+        try:
+            loop.run_until_complete(_run_listener())
+        except Exception as e:
+            queue_message(f"WAKEWORD: Loop error — {e}")
+        finally:
+            loop.close()
+
+
+_wake_word_gate = None
+
+
 # ── Lazy SDK import ──────────────────────────────────────────────────
 
 _rtc = None
@@ -393,6 +562,9 @@ class TarsLiveKitClient:
         self._mic_input = None
         self._mic_track = None
         self._audio_player = None
+
+        # Wake word gate
+        self._wake_word_gate = None
 
         # Config
         lk_cfg = CONFIG["LIVEKIT"]
@@ -480,9 +652,28 @@ class TarsLiveKitClient:
             _start_display_server(self._livekit_url, self._room_name)
             queue_message("LIVEKIT: Client initialized — audio Python, video browser")
 
+        # Wake word gate (optional — mutes mic until wake word detected)
+        if lk_cfg.get("wake_word_enabled", False):
+            model_path = lk_cfg.get("wake_word_model", "hey_livekit.onnx")
+            # Resolve relative paths from src/ directory
+            if not os.path.isabs(model_path):
+                base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                model_path = os.path.join(base_dir, model_path)
+            self._wake_word_gate = WakeWordGate(
+                model_path=model_path,
+                threshold=lk_cfg.get("wake_word_threshold", 0.5),
+                silence_timeout=lk_cfg.get("wake_word_silence_timeout", 8.0),
+            )
+            self._wake_word_gate.start(self._mic_track, self._room)
+            queue_message("LIVEKIT: Wake word gate enabled")
+
     async def disconnect(self):
         """Disconnect from the room and clean up."""
         self._shutdown.set()
+
+        if self._wake_word_gate is not None:
+            self._wake_word_gate.stop()
+            self._wake_word_gate = None
 
         _stop_display()
 
@@ -626,6 +817,9 @@ class TarsLiveKitClient:
                     queue_message(
                         f"LIVEKIT: Audio from {participant.identity} → speaker"
                     )
+                # Notify wake word gate that agent is speaking
+                if self._wake_word_gate is not None:
+                    self._wake_word_gate.notify_agent_audio()
                 set_tars_state(TarsState.TALKING)
 
             if track.kind == _rtc.TrackKind.KIND_VIDEO:

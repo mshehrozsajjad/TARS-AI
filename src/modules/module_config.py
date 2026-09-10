@@ -607,6 +607,10 @@ def load_config():
             "camera_height": config.getint('LIVEKIT', 'camera_height', fallback=480),
             "play_local_audio": config.getboolean('LIVEKIT', 'play_local_audio', fallback=True),
             "display_mode": config.get('LIVEKIT', 'display_mode', fallback='browser'),
+            "wake_word_enabled": config.getboolean('LIVEKIT', 'wake_word_enabled', fallback=False),
+            "wake_word_model": config.get('LIVEKIT', 'wake_word_model', fallback='hey_livekit.onnx'),
+            "wake_word_threshold": config.getfloat('LIVEKIT', 'wake_word_threshold', fallback=0.5),
+            "wake_word_silence_timeout": config.getfloat('LIVEKIT', 'wake_word_silence_timeout', fallback=8.0),
         },
         "GEMINI_LIVE": {
             "conversation_mode": config.get('GEMINI_LIVE', 'conversation_mode', fallback='standard'),
