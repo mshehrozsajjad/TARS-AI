@@ -342,7 +342,7 @@ class WakeWordGate:
         self._model_name = ""
 
     def start(self, mic_track, room):
-        """Start wake word detection. Mutes the mic track immediately."""
+        """Start wake word detection. Delays muting until agent greeting finishes."""
         self._mic_track = mic_track
         self._room = room
         self._stop_event.clear()
@@ -351,12 +351,22 @@ class WakeWordGate:
         if not self._load_model():
             return
 
-        # Mute mic on start — agent hears nothing until wake word
+        # Start async detection loop — it waits for the agent's initial
+        # greeting before muting the mic (avoids breaking avatar sync)
+        asyncio.ensure_future(self._delayed_start())
+
+    async def _delayed_start(self):
+        """Wait for agent to connect and finish greeting, then mute and listen."""
+        # Wait for agent to join and deliver initial greeting
+        queue_message("WAKEWORD: Waiting for agent greeting before activating...")
+        await asyncio.sleep(15)
+
+        if self._stop_event.is_set():
+            return
+
         self._set_mic_muted(True)
         queue_message("WAKEWORD: Mic muted — listening for wake word locally")
-
-        # Start async detection loop (runs in the LiveKit event loop)
-        asyncio.ensure_future(self._detection_loop())
+        await self._detection_loop()
 
     def stop(self):
         """Stop wake word detection."""
