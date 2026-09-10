@@ -103,9 +103,10 @@ display_mode = browser
 # Requires: pip install "livekit-wakeword[listener]"
 # When disabled, mic is always live (agent hears everything)
 wake_word_enabled = False
-# Wake word model file — .onnx file in src/ or absolute path
-# Use "hey_livekit.onnx" for default, or train your own with livekit-wakeword
-wake_word_model = hey_livekit.onnx
+# Wake word model — path to .onnx file (relative to src/) or pretrained name
+# Pretrained: hey_mycroft, hey_jarvis, alexa
+# Custom: tts/hey_tars.onnx, stt/TARS.onnx (relative to src/)
+wake_word_model = hey_mycroft
 # Detection threshold (0.0-1.0) — lower = more sensitive, higher = fewer false positives
 wake_word_threshold = 0.5
 # Seconds of silence after last agent speech before re-muting mic (waiting for wake word again)
