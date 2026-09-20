@@ -317,9 +317,9 @@ async def tars_session(ctx: agents.JobContext):
         },
     )
 
-    # Start avatar BEFORE session (order matters — see examlingo notes)
+    # Start avatar BEFORE session (order matters for audio pipeline wiring)
     if avatar:
-        await avatar.start(session, room=ctx.room, livekit_url=LIVEKIT_URL)
+        await avatar.start(session, room=ctx.room)
         logger.info("Bey avatar started — video track publishing")
 
     await session.start(
@@ -327,15 +327,13 @@ async def tars_session(ctx: agents.JobContext):
         agent=TarsAgent(),
     )
 
-    # Set neutral pose on startup
-    try:
-        await ctx.room.local_participant.perform_rpc(
-            destination_identity="tars-pi",
-            method="move",
-            payload='{"name": "neutral", "speed": "slow"}',
-        )
-    except Exception as e:
-        logger.warning("Could not set neutral pose: %s", e)
+    # Wait for avatar participant to stabilize before greeting.
+    # The bey-avatar-agent often disconnects and reconnects on startup —
+    # if we generate_reply too early, the audio pipeline crashes.
+    if avatar:
+        import asyncio
+        logger.info("Waiting for avatar participant to stabilize...")
+        await asyncio.sleep(5)
 
     # Greet when the Pi participant joins
     await session.generate_reply(

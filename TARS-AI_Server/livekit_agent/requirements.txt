@@ -1,11 +1,11 @@
 # TARS LiveKit Agent Dependencies
 # Install: pip install -r requirements.txt
 
-livekit-agents~=1.6.2
-livekit-plugins-deepgram~=1.6.2
-livekit-plugins-openai~=1.6.2
-livekit-plugins-elevenlabs~=1.6.2
-livekit-plugins-silero~=1.6.2
-livekit-plugins-bey~=1.0
+livekit-agents~=1.8.2
+livekit-plugins-deepgram~=1.8.2
+livekit-plugins-openai~=1.8.2
+livekit-plugins-elevenlabs~=1.8.2
+livekit-plugins-silero~=1.8.2
+livekit-plugins-bey~=1.8.2
 
 python-dotenv>=1.0.0
