@@ -27,6 +27,7 @@ from livekit.agents import (
     Agent,
     AutoSubscribe,
     RunContext,
+    TurnHandlingOptions,
     function_tool,
     cli,
 )
@@ -41,6 +42,8 @@ logger = logging.getLogger("tars-agent")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb")
 ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2")
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
+STT_MODEL = os.getenv("STT_MODEL", "flux-general-en")
+STT_LANGUAGE = os.getenv("STT_LANGUAGE", "en")
 CHARACTER_NAME = os.getenv("CHARACTER_NAME", "TARS")
 BEY_AVATAR_ENABLED = os.getenv("BEY_AVATAR_ENABLED", "true").lower() not in ("0", "false", "no", "off")
 BEY_AVATAR_ID = os.getenv("BEY_AVATAR_ID", "")
@@ -302,22 +305,27 @@ async def tars_session(ctx: agents.JobContext):
             avatar = bey.AvatarSession(**bey_opts)
 
     # ── Voice pipeline ───────────────────────────────────────────
+    # Flux models use Deepgram's v2 API (lower latency, English-only)
+    if STT_MODEL.startswith("flux-"):
+        stt = deepgram.STTv2(model=STT_MODEL)
+    else:
+        stt = deepgram.STT(model=STT_MODEL, language=STT_LANGUAGE)
+
     session = AgentSession(
-        stt=deepgram.STT(model="nova-3", language="en"),
+        stt=stt,
         llm=openai.LLM(model=LLM_MODEL),
         tts=elevenlabs.TTS(
             voice_id=ELEVENLABS_VOICE_ID,
             model=ELEVENLABS_MODEL,
         ),
-        turn_handling={
-            # Wider endpointing — don't cut off the user mid-pause
-            "endpointing": {"min_delay": 0.15, "max_delay": 0.5},
-            # Don't interrupt TARS while speaking
-            "interruption": {"enabled": False},
-        },
+        turn_handling=TurnHandlingOptions(
+            turn_detection="vad",
+        ),
     )
 
-    # Start avatar BEFORE session (order matters for audio pipeline wiring)
+    # Start avatar BEFORE session (order matters for audio pipeline wiring).
+    # The Bey plugin needs an explicit livekit_url — its env-var fallback
+    # is unreliable in cloud deploys, so we pass the normalised wss:// value.
     if avatar:
         await avatar.start(session, room=ctx.room, livekit_url=LIVEKIT_URL)
         logger.info("Bey avatar started — video track publishing")
@@ -326,11 +334,6 @@ async def tars_session(ctx: agents.JobContext):
         room=ctx.room,
         agent=TarsAgent(),
     )
-
-    # Brief pause for avatar participant to stabilize before greeting
-    if avatar:
-        import asyncio
-        await asyncio.sleep(2)
 
     # Greet when the Pi participant joins
     await session.generate_reply(
